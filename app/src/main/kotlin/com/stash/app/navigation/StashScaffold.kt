@@ -114,6 +114,8 @@ fun StashScaffold(
 
     // Android 13+ runtime permission for notifications. One-shot per install.
     RequestNotificationPermissionOnce()
+    // LUMA: "Update available" popup when GitHub has a newer LUMA release.
+    com.stash.app.update.UpdatePrompt()
 
     // Canonical bottom-nav tab switch (save/restore semantics + reselect-pop).
     // Local fun rather than inline in StashBottomBar's onNavigate so screens

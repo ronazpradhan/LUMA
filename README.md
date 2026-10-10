@@ -40,6 +40,8 @@ LUMA mirrors your Spotify and YouTube Music libraries to your Android phone. Con
 3. Open LUMA, tap the gear at the top right of Home, and connect Spotify and/or YouTube Music under **Accounts**.
 4. Go to **Sync**, choose your playlists, and tap **Sync now**.
 
+> **Coming from LUMA 1.0 or 1.1?** Those were test builds. Uninstall the old LUMA once, then install this one. From 1.2.0 on, every update installs over the last, and LUMA tells you with a popup when a new version is out.
+
 **Requirements:** Android 8.0 or later. A Spotify and/or YouTube Music account. For downloads, room for your music (a four-minute song is roughly 4 to 10 MB).
 
 > LUMA is not on the Play Store. It signs in to Spotify and YouTube with your own login, which store policies don't allow, so it's installed straight from this page.
@@ -64,7 +66,7 @@ LUMA has no server of its own. Besides Spotify and YouTube / YouTube Music (sign
 - **Spotify's public embed page** (`open.spotify.com`), only when you import a playlist link, to read the playlist's name and songs.
 - **Last.fm** isn't available in this build: it ships without a Last.fm API key, so there is nothing to connect and no Last.fm lookups.
 - **MusicBrainz**, for artist details, and **JioSaavn**, as the AAC fallback.
-- **GitHub**, for yt-dlp updates.
+- **GitHub**, to check for new LUMA versions each time the app opens, and for yt-dlp updates.
 - **The Stash project's share service**, only when you open a shared mix or song link, or turn on Community.
 - **Google Cast**, only when you open the speaker list.
 
@@ -91,6 +93,7 @@ Stash and LUMA are separate projects. LUMA isn't endorsed by or affiliated with 
 - Spotify playlist import from a link, and listening-based suggestions on Home and Search.
 - Faster song start (no waiting on a slow backup search), and Search no longer pops the keyboard.
 - Lossless (Qobuz FLAC) removed entirely.
+- Signed with LUMA's own release key, and an in-app popup when a new version is out.
 - Stash's donation prompts, supporter ticker, Discord button, update checker and links to the Stash website removed.
 
 ## Acknowledgments
