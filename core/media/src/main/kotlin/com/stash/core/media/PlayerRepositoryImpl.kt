@@ -323,6 +323,15 @@ class PlayerRepositoryImpl @Inject constructor(
                     prefetchNextTrack()
                 }
         }
+        // LUMA: the next-up's full-chain resolve (yt-dlp allowed) once the current
+        // track is in its last stretch, if the fast lane didn't already cache it.
+        scope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(NEAR_END_POLL_MS)
+                val controller = controllerDeferred ?: continue
+                if (controller.isPlaying && nearTrackEnd(controller)) prefetchNextTrack(fromNearEndWatch = true)
+            }
+        }
     }
 
     private val _playerState = MutableStateFlow(PlayerState())
@@ -369,6 +378,9 @@ class PlayerRepositoryImpl @Inject constructor(
      * Internal as a test seam: gate/queue tests inject a mock controller here. */
     @Volatile
     internal var controllerDeferred: MediaController? = null
+
+    /** LUMA: the next-up that last got a full-chain (yt-dlp) prefetch. */
+    private var fullPrefetchTriedId: Long? = null
 
     /** Serialises controller construction — see [ensureController]. */
     private val controllerBuildMutex = Mutex()
@@ -824,7 +836,14 @@ class PlayerRepositoryImpl @Inject constructor(
      * MediaItem stays in place and [RefreshingDataSourceFactory] handles
      * any 403 at playback time, exactly as before this prefetch existed.
      */
-    internal suspend fun prefetchNextTrack() {
+    /** True in the last [PREFETCH_FULL_WINDOW_MS] of the current track (false while its length is unknown). */
+    private fun nearTrackEnd(controller: MediaController): Boolean {
+        val duration = controller.duration
+        if (duration == C.TIME_UNSET || duration <= 0L) return false
+        return duration - controller.currentPosition <= PREFETCH_FULL_WINDOW_MS
+    }
+
+    internal suspend fun prefetchNextTrack(fromNearEndWatch: Boolean = false) {
         if (listenTogetherOwnsQueue) return
         val controller = controllerDeferred ?: return
         val tracks = currentQueueTracks
@@ -871,7 +890,11 @@ class PlayerRepositoryImpl @Inject constructor(
         // advance fans out up to 3 identical resolves — 3× the quota burn on a
         // capped lossless source (verified on-device 2026-06-21). Claim the id; a racing call for
         // the same next-up returns immediately and lets the winner cache it.
+        // LUMA: the near-end watcher polls; one full-chain try per next-up is enough.
+        val full = nearTrackEnd(controller)
+        if (fromNearEndWatch && (!full || next.id == fullPrefetchTriedId)) return
         if (!prefetchInFlight.add(next.id)) return
+        if (full) fullPrefetchTriedId = next.id
 
         val t0 = System.currentTimeMillis()
         Log.d("LATDIAG", "prefetch-next-start id=${next.id} youtubeId=${next.youtubeId}")
@@ -880,7 +903,13 @@ class PlayerRepositoryImpl @Inject constructor(
             // Full-fat resolve (allowYtDlp = true) for the single next-up track
             // during active playback, so auto-advance stays seamless during a
             // Qobuz-proxy outage even if it falls through to the YouTube path.
-            streamResolver.resolve(entity, allowYouTube = true, allowYtDlp = true)
+            // LUMA: yt-dlp runs one at a time and can't be stopped once started, so
+            // a next-up resolve that reached it early held the only slot while the
+            // listener tapped another song, whose own fallback then queued behind
+            // it (seconds per tap, worst with autoplay radio filling the queue).
+            // Early on only the fast lane runs; the full chain waits until the
+            // current track is near its end (see the near-end watcher in init).
+            streamResolver.resolve(entity, allowYouTube = true, allowYtDlp = full)
         } catch (ce: CancellationException) {
             prefetchInFlight.remove(next.id)
             throw ce
@@ -2795,6 +2824,9 @@ class PlayerRepositoryImpl @Inject constructor(
 
         /** Refresh prefetch if cached URL has less than this margin remaining. */
         private const val PREFETCH_FRESH_THRESHOLD_MS = 60_000L
+        /** LUMA: how close to the current track's end the next-up may use yt-dlp. */
+        private const val PREFETCH_FULL_WINDOW_MS = 45_000L
+        private const val NEAR_END_POLL_MS = 5_000L
     }
 
     /**

@@ -228,6 +228,9 @@ class PlayerRepositoryFullTimelineTest {
             )
             .build()
         every { controller.currentMediaItem } returns currentItem
+        // Near the current track's end: the next-up may take the full chain.
+        every { controller.duration } returns 200_000L
+        every { controller.currentPosition } returns 180_000L
         every { controller.nextMediaItemIndex } returns 3
         every { controller.mediaItemCount } returns 4
         every { controller.getMediaItemAt(0) } returns shuffledNextItem
@@ -476,6 +479,37 @@ class PlayerRepositoryFullTimelineTest {
         verify(exactly = 0) { controller.replaceMediaItem(any(), any()) }
         verify(exactly = 0) { controller.prepare() }
         verify(exactly = 0) { controller.play() }
+    }
+
+    @Test
+    fun `early in a track the next-up prefetch stays off yt-dlp`() = runTest {
+        coEvery { streamingPreference.current() } returns true
+        every { streamUrlCache.get(42L) } returns null
+        coEvery { trackDao.getById(42L) } returns null
+        val current = Track(id = 41L, title = "Current", artist = "Artist")
+        val next = Track(id = 42L, title = "Next", artist = "Artist", isStreamable = true)
+        fun item(track: Track) = MediaItem.Builder()
+            .setMediaId(track.id.toString())
+            .setUri("stash-resolve://track/${track.id}")
+            .setMediaMetadata(
+                androidx.media3.common.MediaMetadata.Builder().setExtras(
+                    android.os.Bundle().apply { putLong(EXTRA_TRACK_ID, track.id) },
+                ).build(),
+            )
+            .build()
+        every { controller.currentMediaItem } returns item(current)
+        every { controller.nextMediaItemIndex } returns 1
+        every { controller.mediaItemCount } returns 2
+        every { controller.getMediaItemAt(1) } returns item(next)
+        every { controller.duration } returns 200_000L
+        every { controller.currentPosition } returns 10_000L
+        coEvery { streamResolver.resolve(any(), allowYouTube = true, allowYtDlp = any()) } returns null
+        repo.currentQueueTracks = listOf(current, next)
+
+        repo.prefetchNextTrack()
+
+        coVerify(exactly = 1) { streamResolver.resolve(match { it.id == 42L }, allowYouTube = true, allowYtDlp = false) }
+        coVerify(exactly = 0) { streamResolver.resolve(any(), allowYouTube = true, allowYtDlp = true) }
     }
 
     @Test

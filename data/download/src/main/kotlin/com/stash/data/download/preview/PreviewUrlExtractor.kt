@@ -222,6 +222,9 @@ class PreviewUrlExtractor @Inject constructor(
         private const val INNERTUBE_CONCURRENCY = 8
         /** How long InnerTube gets to answer before yt-dlp is started alongside it. */
         internal const val YTDLP_GRACE_MS = 1_500L
+
+        /** LUMA: how long a fast-lane miss sends the full race straight to yt-dlp. */
+        internal const val FAST_MISS_MEMORY_MS = 60_000L
         private const val YTDLP_CONCURRENCY = 1   // was 2 — see spec
 
         /** Upper bound on [observedCodecs] before it is dropped wholesale. */
@@ -502,6 +505,9 @@ class PreviewUrlExtractor @Inject constructor(
      * Underlying race body — original `extractStreamUrl` implementation.
      * Called via [coalesce] from the public entry point.
      */
+    /** LUMA: videos the fast lane just failed on, so the full race goes straight to yt-dlp. */
+    private val recentFastMisses = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
     private suspend fun doExtract(videoId: String, allowYtDlp: Boolean, lowestQuality: Boolean = false): String {
         // Fast-only lane: InnerTube under its own semaphore, never the
         // serialized yt-dlp slot. A miss is signalled (not retried here) so
@@ -512,6 +518,7 @@ class PreviewUrlExtractor @Inject constructor(
             Log.d("LATDIAG", "extract-start videoId=$videoId fastOnly=1")
             val url = innerTubeSemaphore.withPermit { extractViaInnerTube(videoId, lowestQuality) } ?: run {
                 Log.d("LATDIAG", "extract-fail videoId=$videoId dt=${System.currentTimeMillis() - t0}ms fastOnly=1 err=NoFastStream")
+                recentFastMisses[videoId] = System.currentTimeMillis()
                 throw NoFastStreamException(videoId)
             }
             Log.d("LATDIAG", "extract-end videoId=$videoId dt=${System.currentTimeMillis() - t0}ms fastOnly=1")
@@ -524,6 +531,13 @@ class PreviewUrlExtractor @Inject constructor(
             val url = race(
                 videoId = videoId,
                 innerTubeExtract = { id ->
+                    // LUMA: the fast lane just missed this video (a signed-out bot check,
+                    // usually): asking the same clients again only delayed yt-dlp by ~1 s.
+                    val missedAt = recentFastMisses[id]
+                    if (missedAt != null && System.currentTimeMillis() - missedAt < FAST_MISS_MEMORY_MS) {
+                        Log.d("LATDIAG", "innertube-skip videoId=$id (fast lane missed ${System.currentTimeMillis() - missedAt}ms ago)")
+                        return@race null
+                    }
                     val it0 = System.currentTimeMillis()
                     val result = runCatching { extractViaInnerTube(id, lowestQuality) }
                     val dt = System.currentTimeMillis() - it0
