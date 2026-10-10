@@ -195,6 +195,7 @@ fun HomeScreen(
     }
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val ytShelves by ytFeedViewModel.shelves.collectAsStateWithLifecycle()
+    val anyServiceConnected by ytFeedViewModel.anyServiceConnected.collectAsStateWithLifecycle()
     val heroMinimized by viewModel.heroMinimized.collectAsStateWithLifecycle()
     // Master streaming-mode flag. Both the top-bar StreamingModeChip and
     // the sheet (StreamingModeSheet) render from this single source of
@@ -367,7 +368,7 @@ fun HomeScreen(
                     loading = true,
                     modifier = Modifier.padding(horizontal = 16.dp),
                 )
-                uiState.showColdStartCard -> PersonalizeCard(
+                uiState.showColdStartCard && !anyServiceConnected -> PersonalizeCard(
                     onConnect = onNavigateToSettings,
                     modifier = Modifier.padding(horizontal = 16.dp),
                 )

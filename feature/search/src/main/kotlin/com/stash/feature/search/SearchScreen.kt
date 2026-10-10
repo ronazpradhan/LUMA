@@ -1,5 +1,6 @@
 package com.stash.feature.search
 
+import com.stash.core.ui.components.motion.songTap
 import com.stash.core.ui.components.LocalBottomChromePadding
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -345,7 +346,7 @@ private fun RecentSearches(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { onSuggestionTap(t) }
+                        .songTap(onClick = { onSuggestionTap(t) }, cornerRadius = 0.dp)
                         .padding(horizontal = 20.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {

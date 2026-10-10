@@ -1,5 +1,6 @@
 package com.stash.core.ui.components
 
+import com.stash.core.ui.components.motion.songTap
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -88,11 +89,8 @@ fun DetailTrackRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .songTap(onClick = onClick, onLongClick = onLongPress, cornerRadius = 0.dp)
             .background(rowBackground)
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = onLongPress,
-            )
             .padding(horizontal = 20.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

@@ -17,6 +17,8 @@ dependencies {
     // to feed the SyncStatusCard's "Connect Spotify / YouTube" prompt.
     // Both moved to :feature:sync along with the card.
     implementation(project(":core:data"))
+    // LUMA: Home hides "Personalize your Home" once Spotify or YouTube Music is connected.
+    implementation(project(":core:auth"))
     implementation(project(":core:media"))
     // Still required after the SyncStatusCard relocation: the lossless
     // retry/backfill banners on Home read MetadataBackfillState,

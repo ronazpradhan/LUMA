@@ -546,7 +546,8 @@ private fun LibraryContent(
         // gating on activeTab here would flash the rail onto other pages.
         val libraryHeader: @Composable () -> Unit = {
             Column {
-                if (state.recentlyAdded.isNotEmpty()) {
+                // LUMA: no "Recently downloaded" rail.
+                if (false && state.recentlyAdded.isNotEmpty()) {
                     RecentlyDownloadedRail(
                         tracks = state.recentlyAdded.take(12),
                         onTrackClick = onTrackClick,
@@ -887,7 +888,7 @@ private fun LikedTab(
                 )
             }
         }
-        VerticalScrollbar(state = listState)
+        // LUMA: no scrollbar.
     }
 
     // ── Context-menu bottom sheet (shared component) ────────────────────
@@ -1298,7 +1299,7 @@ private fun PlaylistsGrid(
                 }
             }
         }
-        VerticalScrollbar(state = gridState)
+        // LUMA: no scrollbar.
     }
 
     // ── Context-menu bottom sheet ───────────────────────────────────────
@@ -1578,7 +1579,7 @@ private fun TracksTab(
                 )
             }
         }
-        VerticalScrollbar(state = listState)
+        // LUMA: no scrollbar.
     }
 
     // ── Context-menu bottom sheet (shared component) ────────────────────
@@ -1829,7 +1830,7 @@ private fun ArtistsGrid(
                 }
             }
         }
-        VerticalScrollbar(state = gridState)
+        // LUMA: no scrollbar.
     }
 
     // ── Context-menu bottom sheet ───────────────────────────────────────
@@ -2063,7 +2064,7 @@ private fun AlbumsGrid(
                 }
             }
         }
-        VerticalScrollbar(state = gridState)
+        // LUMA: no scrollbar.
     }
 
     // ── Context-menu bottom sheet ───────────────────────────────────────

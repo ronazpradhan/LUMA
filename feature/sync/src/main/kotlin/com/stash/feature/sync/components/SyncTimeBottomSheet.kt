@@ -13,6 +13,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.TimePicker
 import androidx.compose.material3.TimePickerDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -30,7 +31,8 @@ fun SyncTimeBottomSheet(
     onConfirm: (hour: Int, minute: Int) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val sheetState = rememberModalBottomSheetState()
+    // LUMA: open fully, so the whole clock shows without pulling the sheet up.
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val timeState = rememberTimePickerState(
         initialHour = initialHour,
         initialMinute = initialMinute,
@@ -43,6 +45,7 @@ fun SyncTimeBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(androidx.compose.foundation.rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 8.dp),
         ) {
             Text(

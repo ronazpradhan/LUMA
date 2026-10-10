@@ -349,7 +349,7 @@ fun PlaylistDetailScreen(
                     }
                 }
             }
-            VerticalScrollbar(state = listState)
+            // LUMA: no scrollbar.
         }
 
         // ── Selection chrome (overlaid contextual top + bottom bars) ────────

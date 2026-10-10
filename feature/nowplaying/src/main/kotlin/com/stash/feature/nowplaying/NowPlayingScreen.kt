@@ -1,5 +1,6 @@
 package com.stash.feature.nowplaying
 
+import com.stash.core.ui.components.motion.songTap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.layout.Arrangement
@@ -1141,7 +1142,7 @@ private fun UpNextCard(
         }
         Spacer(Modifier.height(6.dp))
         Row(
-            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(onClick = onPlay),
+            modifier = Modifier.fillMaxWidth().songTap(onClick = onPlay).clip(RoundedCornerShape(12.dp)),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             AsyncImage(

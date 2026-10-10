@@ -1,5 +1,6 @@
 package com.stash.feature.search
 
+import com.stash.core.ui.components.motion.songTap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -122,12 +123,12 @@ fun SongRow(
         modifier = modifier
             .fillMaxWidth()
             .testTag("SongRow")
-            .clip(RoundedCornerShape(12.dp))
-            .background(rowBackground)
             // Whole row = play affordance. Tapping while a 30s preview plays stops it
             // (inherits the old ▶/⏹ button toggle) so a running preview is never
             // orphaned. The download button + ⋮ below consume their own taps.
-            .clickable { if (isPreviewPlaying) onStopPreview() else onPlay() }
+            .songTap(onClick = { if (isPreviewPlaying) onStopPreview() else onPlay() })
+            .clip(RoundedCornerShape(12.dp))
+            .background(rowBackground)
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

@@ -17,6 +17,8 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -32,7 +34,27 @@ class YouTubeHomeFeedViewModel @Inject constructor(
     private val ytMusic: YTMusicApiClient,
     private val playerRepository: PlayerRepository,
     private val listeningSuggestions: com.stash.core.data.suggest.ListeningSuggestions,
+    private val tokenManager: com.stash.core.auth.TokenManager,
 ) : ViewModel() {
+
+    /**
+     * True once Spotify or YouTube Music is signed in: Home then drops its
+     * "Personalize" card. Also true when a sign-in cookie is stored but the
+     * profile fetch never landed (the service still syncs; it just isn't
+     * reported as Connected).
+     */
+    val anyServiceConnected: StateFlow<Boolean> = kotlinx.coroutines.flow.combine(
+        tokenManager.spotifyAuthState,
+        tokenManager.youTubeAuthState,
+    ) { spotify, youTube -> spotify to youTube }
+        .map { (spotify, youTube) ->
+            spotify is com.stash.core.auth.model.AuthState.Connected ||
+                youTube is com.stash.core.auth.model.AuthState.Connected ||
+                runCatching {
+                    !tokenManager.getSpDcCookie().isNullOrBlank() || !tokenManager.getYouTubeCookie().isNullOrBlank()
+                }.getOrDefault(false)
+        }
+        .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, false)
 
     private val _shelves = MutableStateFlow<List<YTHomeShelf>>(emptyList())
     val shelves: StateFlow<List<YTHomeShelf>> = _shelves.asStateFlow()
@@ -50,26 +72,42 @@ class YouTubeHomeFeedViewModel @Inject constructor(
         if (loading) return
         loading = true
         if (userPulled) _refreshing.value = true
+        // The feed and "Suggested for you" load side by side and each lands as soon
+        // as it is ready; the rows on screen stay until then. The spinner stops
+        // with the feed, not with the slower suggestions.
+        var suggested: YTHomeShelf? = _shelves.value.firstOrNull { it.title == SUGGESTED_TITLE }
+        var home: List<YTHomeShelf> = _shelves.value.filter { it.title != SUGGESTED_TITLE }
+        fun publish() {
+            val next = listOfNotNull(suggested) + home
+            if (next.isNotEmpty()) _shelves.value = next
+        }
         viewModelScope.launch {
-            try {
-                val feed = kotlinx.coroutines.coroutineScope {
-                    val home = async { runCatching { ytMusic.getHomeFeed() }.getOrDefault(emptyList()) }
-                    val picks = async { runCatching { listeningSuggestions.load() }.getOrNull() }
-                    // LUMA: "Suggested for you" from what you listen to leads the feed; it is
-                    // re-picked on every refresh, so a pull always brings new songs.
-                    val suggested = picks.await()?.takeIf { it.basedOn != null && it.songs.isNotEmpty() }?.let { s ->
-                        YTHomeShelf("Suggested for you", s.songs.map { YTHomeItem.Song(it) })
-                    }
-                    listOfNotNull(suggested) + home.await().map { shelf ->
-                        if (userPulled) shelf.copy(items = shelf.items.shuffled()) else shelf
-                    }
+            val picks = launch {
+                val s = kotlinx.coroutines.withTimeoutOrNull(SUGGEST_TIMEOUT_MS) {
+                    runCatching { listeningSuggestions.load() }.getOrNull()
                 }
-                if (feed.isNotEmpty()) _shelves.value = feed
+                s?.takeIf { it.basedOn != null && it.songs.isNotEmpty() }?.let { found ->
+                    suggested = YTHomeShelf(SUGGESTED_TITLE, found.songs.map { YTHomeItem.Song(it) })
+                    publish()
+                }
+            }
+            try {
+                val feed = runCatching { ytMusic.getHomeFeed() }.getOrDefault(emptyList())
+                if (feed.isNotEmpty()) {
+                    home = feed.map { shelf -> if (userPulled) shelf.copy(items = shelf.items.shuffled()) else shelf }
+                    publish()
+                }
             } finally {
-                loading = false
                 _refreshing.value = false
             }
+            picks.join()
+            loading = false
         }
+    }
+
+    private companion object {
+        const val SUGGESTED_TITLE = "Suggested for you"
+        const val SUGGEST_TIMEOUT_MS = 6_000L
     }
 
     fun play(item: YTHomeItem) {
