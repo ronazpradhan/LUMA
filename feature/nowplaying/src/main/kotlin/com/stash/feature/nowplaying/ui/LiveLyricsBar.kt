@@ -113,17 +113,11 @@ fun LiveLyricsBar(
         // Scrim + static ink follow the resolved theme so the bar reads on
         // both the dark ambient and the light pastel wash.
         val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.5f
-        val scrimBase = if (darkTheme) BarBase else BarBaseLight
         Box(
+            // LUMA: straight on the player's frosted glass, no scrim or pill.
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable(onClickLabel = "Open lyrics", onClick = onTap)
-                .background(
-                    Brush.verticalGradient(
-                        0f to scrimBase.copy(alpha = 0.30f),
-                        1f to scrimBase.copy(alpha = 0.65f),
-                    ),
-                )
                 .padding(horizontal = 20.dp, vertical = 16.dp),
             contentAlignment = Alignment.Center,
         ) {

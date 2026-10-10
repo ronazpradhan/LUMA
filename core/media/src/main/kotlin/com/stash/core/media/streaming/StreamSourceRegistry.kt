@@ -291,7 +291,25 @@ class StreamSourceRegistry internal constructor(
                         return@coroutineScope result
                     }
                 }
-                jioLane?.await()?.let {
+                // LUMA: a ready YouTube stream no longer waits out the whole JioSaavn
+                // search (measured: ~0.3 s on Wi-Fi, more on mobile data, on every
+                // tap). JioSaavn still wins when it answers first or within
+                // JIO_GRACE_MS of the fast lane; a fast-lane miss still waits for it.
+                val jioResult = jioLane?.let { jio ->
+                    val fast = fastLane
+                    if (fast == null) return@let jio.await()
+                    kotlinx.coroutines.selects.select<Unit> {
+                        jio.onAwait {}
+                        fast.onAwait {}
+                    }
+                    when {
+                        jio.isCompleted -> jio.await()
+                        fast.await() == null -> jio.await()
+                        else -> kotlinx.coroutines.withTimeoutOrNull(JIO_GRACE_MS) { jio.await() }
+                            .also { if (!jio.isCompleted) jio.cancel() }
+                    }
+                }
+                jioResult?.let {
                     Log.i(TAG, "jiosaavn served ${track.id} '${track.title}' (hedged)")
                     servedBy = "jiosaavn"
                     fastLane?.cancel()
@@ -342,5 +360,7 @@ class StreamSourceRegistry internal constructor(
 
     private companion object {
         private const val TAG = "StreamSourceRegistry"
+        /** How long a ready YouTube stream waits for a still-searching JioSaavn. */
+        private const val JIO_GRACE_MS = 250L
     }
 }

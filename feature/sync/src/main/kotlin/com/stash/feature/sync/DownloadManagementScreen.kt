@@ -57,7 +57,7 @@ fun DownloadManagementScreen(
     }
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = androidx.compose.ui.graphics.Color.Transparent, // LUMA: the ambient backdrop shows through
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         Column(

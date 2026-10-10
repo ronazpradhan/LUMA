@@ -122,8 +122,7 @@ fun LikedSongsDetailScreen(
 
     Box(
         modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
+            .fillMaxSize(),
     ) {
         when {
             // -- Loading indicator centered on screen --

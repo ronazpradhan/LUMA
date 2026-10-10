@@ -237,12 +237,16 @@ fun StashScaffold(
         val layoutDirection = LocalLayoutDirection.current
         val contentPadding = PaddingValues(
             start = innerPadding.calculateStartPadding(layoutDirection),
-            top = innerPadding.calculateTopPadding(),
+            // The top inset is applied inside each screen (StashNavHost), under its backdrop.
+            top = 0.dp,
             end = innerPadding.calculateEndPadding(layoutDirection),
             bottom = 0.dp,
         )
         Box(modifier = Modifier.fillMaxSize()) {
-            CompositionLocalProvider(LocalBottomChromePadding provides chromePadding) {
+            CompositionLocalProvider(
+                LocalBottomChromePadding provides chromePadding,
+                com.stash.core.ui.components.LocalTopInsetPadding provides innerPadding.calculateTopPadding(),
+            ) {
                 StashNavHost(
                     navController = navController,
                     modifier = Modifier
@@ -278,9 +282,7 @@ fun StashScaffold(
                         .windowInsetsPadding(WindowInsets.navigationBars)
                         .padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
                 ) {
-                    AnimatedVisibility(visibleState = chromeShown, enter = fadeIn(), exit = fadeOut()) {
-                        com.stash.core.ui.components.QobuzDiscoveryBanner(status = qobuzStatus)
-                    }
+                    // LUMA: no Qobuz, so no Qobuz status banner.
                     AnimatedVisibility(
                         visibleState = chromeShown,
                         enter = slideInVertically(tween(NAV_BAR_SLIDE_MS)) { it } + fadeIn(tween(NAV_BAR_SLIDE_MS)),

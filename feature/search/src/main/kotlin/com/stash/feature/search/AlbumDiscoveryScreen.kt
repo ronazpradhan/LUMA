@@ -102,6 +102,7 @@ fun AlbumDiscoveryScreen(
     }
 
     Scaffold(
+        containerColor = androidx.compose.ui.graphics.Color.Transparent, // LUMA: the ambient backdrop shows through
         snackbarHost = { SnackbarHost(snackbar) },
     ) { inner ->
         LazyColumn(

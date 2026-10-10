@@ -66,7 +66,6 @@ fun JoinSessionScreen(onBack: () -> Unit, onJoined: () -> Unit, viewModel: JoinS
     Column(
         Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
             .statusBarsPadding()
             .imePadding()
             .verticalScroll(rememberScrollState())

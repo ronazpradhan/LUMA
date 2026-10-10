@@ -378,11 +378,31 @@ class StreamSourceRegistryTest {
     }
 
     @Test
+    fun `a ready fast lane does not wait out a slow jiosaavn`() = runTest {
+        // LUMA: past the grace window the ready YouTube stream plays.
+        coEvery { streamingPreference.isForceYouTubeFallback() } returns false
+        coEvery { qbdlx.resolve(any()) } returns null
+        coEvery { jiosaavn.resolve(any()) } coAnswers {
+            delay(600)
+            StreamUrl(
+                url = "https://aac.saavncdn.com/song_320.mp4", expiresAtMs = Long.MAX_VALUE,
+                codec = "aac", bitrateKbps = 320, origin = JioSaavnStreamResolver.ORIGIN,
+            )
+        }
+        coEvery { youtube.resolve(any(), allowYtDlp = false) } returns stubStreamUrl("youtube")
+
+        val result = registry(StandardTestDispatcher(testScheduler)).resolve(stubTrack())
+
+        assertThat(result?.origin).isEqualTo("youtube")
+        coVerify(exactly = 0) { youtube.resolve(any(), allowYtDlp = true) }
+    }
+
+    @Test
     fun `jiosaavn keeps its rank over the fast lane when both answer`() = runTest {
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
         coEvery { qbdlx.resolve(any()) } returns null
         coEvery { jiosaavn.resolve(any()) } coAnswers {
-            delay(300)
+            delay(150) // inside the grace window
             StreamUrl(
                 url = "https://aac.saavncdn.com/song_320.mp4", expiresAtMs = Long.MAX_VALUE,
                 codec = "aac", bitrateKbps = 320, origin = JioSaavnStreamResolver.ORIGIN,

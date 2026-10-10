@@ -25,10 +25,12 @@ LUMA mirrors your Spotify and YouTube Music libraries to your Android phone. Con
 
 - **Your YouTube Music home, in the app.** Quick picks, Listen again, Mixed for you and the rest of your YouTube Music feed sit right on Home.
 - **The music never stops.** When your queue ends, LUMA keeps going with similar songs, the way YouTube Music fills its Up next. Tap any song in the feed to start a radio from it.
+- **Suggestions from what you hear.** A "Suggested for you" row on Home and in Search, built from your recent plays. Pull down to refresh for a new set.
+- **Bring your Spotify playlists.** In Library, tap + and paste a Spotify playlist link: LUMA finds every song and saves the playlist, ready to download in one tap.
 - **Download what you choose.** One switch to auto-download your YouTube Music Liked songs, another for your playlists. Everything else streams.
-- **Good sound.** High-quality AAC and Opus audio. FLAC is optional: it only works if you connect your own Qobuz account (or your own lossless relay) in Settings › Audio & Quality.
-- **Lyrics.** Synced, word-by-word where available.
-- **A glass interface.** A floating frosted tab bar and mini player over your music, with quick, fluid motion between screens.
+- **Good sound.** High-quality AAC and Opus audio.
+- **Live lyrics.** Scroll down in the player for synced, word-by-word lyrics.
+- **A glass interface.** Frosted glass everywhere, a player that takes its colours from each album cover, and quick, fluid motion between screens.
 - **Private by design.** No LUMA account and no analytics. Your sign-ins stay on your phone, encrypted, and are only ever sent back to the service they came from.
 
 ## Download
@@ -59,20 +61,20 @@ LUMA has no server of its own. Besides Spotify and YouTube / YouTube Music (sign
 
 - **Lyrics services:** LRCLIB, iTunes Search with paxsenix's lyrics API, KuGou and YouTube Music.
 - **ListenBrainz and Discord**, only if you connect them.
-- **Qobuz's public catalog** (`www.qobuz.com`), in one place only: opening an artist page sends Qobuz the artist's name, to fill in albums YouTube is missing. No account, and nothing else about you. Qobuz audio (FLAC) is only used if you connect your own Qobuz account or set your own lossless relay. LUMA never contacts the Stash lossless relay: this build ships without its config.
+- **Spotify's public embed page** (`open.spotify.com`), only when you import a playlist link, to read the playlist's name and songs.
 - **Last.fm** isn't available in this build: it ships without a Last.fm API key, so there is nothing to connect and no Last.fm lookups.
 - **MusicBrainz**, for artist details, and **JioSaavn**, as the AAC fallback.
 - **GitHub**, for yt-dlp updates.
-- **The Stash project's share service**, only when you share or open a mix or song link, use Listen Together, or turn on Community.
+- **The Stash project's share service**, only when you open a shared mix or song link, or turn on Community.
 - **Google Cast**, only when you open the speaker list.
 
-For exactly what each one is sent, see the detailed list in the [Stash README](https://github.com/rawnaldclark/Stash#what-stash-talks-to). LUMA sends the same to the services above, minus the Stash update check, the supporters list, the Qobuz Home rows, the Stash lossless relay and Last.fm, and plus your YouTube Music home feed and song radio.
+For exactly what each one is sent, see the detailed list in the [Stash README](https://github.com/rawnaldclark/Stash#what-stash-talks-to). LUMA sends the same to the services above, minus everything Qobuz and lossless (LUMA never contacts Qobuz or the Stash lossless relay), the Stash update check, the supporters list and Last.fm, and plus your YouTube Music home feed, song radio and suggestions.
 
 ---
 
 ## Built on Stash ❤️
 
-LUMA is built on **[Stash](https://github.com/rawnaldclark/Stash)** by **Rawnald Clark** and its contributors, a brilliant open-source music app. Almost everything that makes LUMA work is their code: the sync engine, the player, lossless audio, lyrics and much more. Huge thanks to them. If you like LUMA, go give Stash a ⭐.
+LUMA is built on **[Stash](https://github.com/rawnaldclark/Stash)** by **Rawnald Clark** and its contributors, a brilliant open-source music app. Almost everything that makes LUMA work is their code: the sync engine, the player, streaming and downloads, lyrics and much more. Huge thanks to them. If you like LUMA, go give Stash a ⭐.
 
 Stash and LUMA are separate projects. LUMA isn't endorsed by or affiliated with Stash, and problems with LUMA belong here, not with them.
 
@@ -85,6 +87,10 @@ Stash and LUMA are separate projects. LUMA isn't endorsed by or affiliated with 
 - Fix: a newly synced playlist no longer opens empty in Download mode.
 - Fix: the Home tab can always be reached from the other tabs.
 - A frosted-glass floating tab bar and mini player, Settings moved to Home, and faster, smoother screen transitions.
+- A redesigned player: album-coloured glass, the heart on the cover, download beside the quality badge, an Up Next card, and live lyrics below.
+- Spotify playlist import from a link, and listening-based suggestions on Home and Search.
+- Faster song start (no waiting on a slow backup search), and Search no longer pops the keyboard.
+- Lossless (Qobuz FLAC) removed entirely.
 - Stash's donation prompts, supporter ticker, Discord button, update checker and links to the Stash website removed.
 
 ## Acknowledgments

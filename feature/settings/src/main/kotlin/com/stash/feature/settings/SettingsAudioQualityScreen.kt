@@ -140,7 +140,8 @@ fun SettingsAudioQualityScreen(
             }
         }
 
-        // (b) Lossless card.
+        // (b) Lossless card. LUMA: no lossless, so never shown.
+        if (LUMA_LOSSLESS) {
         SettingsSectionLabel("Lossless")
         GlassCard {
             Column(modifier = Modifier.fillMaxWidth()) {
@@ -649,6 +650,8 @@ fun SettingsAudioQualityScreen(
             }
         }
 
+        }
+
         // (c) Effects.
         SettingsSectionLabel("Effects")
         SettingsNavRow(
@@ -657,3 +660,6 @@ fun SettingsAudioQualityScreen(
         )
     }
 }
+
+/** LUMA has no lossless audio; keeps the upstream lossless settings hidden. */
+private const val LUMA_LOSSLESS = false

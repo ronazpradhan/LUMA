@@ -79,7 +79,7 @@ fun MixBuilderScreen(
     LaunchedEffect(Unit) { viewModel.saved.collect { onBack() } }
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = androidx.compose.ui.graphics.Color.Transparent, // LUMA: the ambient backdrop shows through
         topBar = {
             TopAppBar(
                 title = {

@@ -56,6 +56,7 @@ fun MixBrowseScreen(
     }
 
     Scaffold(
+        containerColor = androidx.compose.ui.graphics.Color.Transparent, // LUMA: the ambient backdrop shows through
         topBar = {
             TopAppBar(
                 title = { Text(title) },

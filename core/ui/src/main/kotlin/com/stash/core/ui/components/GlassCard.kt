@@ -5,6 +5,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
@@ -28,13 +30,17 @@ fun GlassCard(
     content: @Composable BoxScope.() -> Unit,
 ) {
     val extendedColors = StashTheme.extendedColors
+    // LUMA: a frosted pane — translucent fill over the ambient glow, rounder
+    // corners, and a rim that catches the light along the top edge.
+    val shape = RoundedCornerShape(24.dp)
+    val rim = Brush.verticalGradient(listOf(extendedColors.glassBorderBright, extendedColors.glassBorder))
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .clip(MaterialTheme.shapes.large),
+            .clip(shape),
         color = extendedColors.glassBackground,
-        shape = MaterialTheme.shapes.large,
-        border = BorderStroke(1.dp, extendedColors.glassBorder),
+        shape = shape,
+        border = BorderStroke(1.dp, rim),
     ) {
         Box(modifier = Modifier.padding(16.dp), content = content)
     }

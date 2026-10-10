@@ -167,8 +167,7 @@ fun PlaylistDetailScreen(
     val listState = rememberLazyListState()
     Box(
         modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
+            .fillMaxSize(),
     ) {
         if (state.isLoading) {
             // -- Loading indicator centered on screen --
@@ -932,12 +931,13 @@ private fun DownloadButton(state: DownloadButtonState, onClick: () -> Unit, modi
             when {
                 !state.on -> Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(20.dp))
                 state.complete -> Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(20.dp))
-                else -> CircularProgressIndicator(
-                    progress = { state.downloaded.toFloat() / state.total },
+                // LUMA: the dropping-arrow glyph, its tray filling as songs land.
+                else -> com.stash.core.ui.components.DownloadingIndicator(
+                    color = color,
+                    size = 20.dp,
+                    progress = state.downloaded.toFloat() / state.total,
                     // The label already says how far along it is; "25 percent" would repeat it.
-                    modifier = Modifier.size(18.dp).clearAndSetSemantics {},
-                    strokeWidth = 2.dp,
-                    trackColor = StashTheme.extendedColors.glassBorderBright,
+                    modifier = Modifier.clearAndSetSemantics {},
                 )
             }
         }

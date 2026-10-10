@@ -122,8 +122,7 @@ fun ArtistDetailScreen(
 
     Box(
         modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
+            .fillMaxSize(),
     ) {
         if (state.isLoading) {
             CircularProgressIndicator(

@@ -119,6 +119,9 @@ fun SearchScreen(
     val currentPlayingYoutubeId by viewModel.currentPlayingYoutubeId.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
+    val suggestionsViewModel: SearchSuggestionsViewModel = androidx.hilt.navigation.compose.hiltViewModel()
+    val suggestions by suggestionsViewModel.state.collectAsStateWithLifecycle()
+    val suggestionsRefreshing by suggestionsViewModel.refreshing.collectAsStateWithLifecycle()
     LaunchedEffect(viewModel) {
         merge(
             viewModel.userMessages,
@@ -128,13 +131,12 @@ fun SearchScreen(
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = androidx.compose.ui.graphics.Color.Transparent, // LUMA: the ambient backdrop shows through
     ) { inner ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(inner)
-                .background(MaterialTheme.colorScheme.background)
                 .statusBarsPadding(),
         ) {
             // Command hero: the page owns its name like Library/Sync do.
@@ -153,7 +155,14 @@ fun SearchScreen(
             )
 
             when (val status = state.status) {
-                SearchStatus.Idle -> RecentSearches(
+                // LUMA: pull down for a fresh set of suggestions.
+                SearchStatus.Idle -> androidx.compose.material3.pulltorefresh.PullToRefreshBox(
+                    isRefreshing = suggestionsRefreshing,
+                    onRefresh = { suggestionsViewModel.refresh(userPulled = true) },
+                    modifier = Modifier.fillMaxSize(),
+                ) { RecentSearches(
+                    suggestions = suggestions,
+                    onSuggestionTap = { t -> viewModel.onResultTap(t.toTrackItem()) },
                     entries = recentSearches,
                     onTap = { entry ->
                         viewModel.onRecentSearchTapped(entry)
@@ -164,7 +173,7 @@ fun SearchScreen(
                     },
                     onRemove = viewModel::removeRecentSearch,
                     onClearAll = viewModel::clearRecentSearches,
-                )
+                ) }
                 SearchStatus.Loading -> LoadingSkeletons()
                 is SearchStatus.Results -> SectionedResultsList(
                     sections = status.sections,
@@ -280,10 +289,7 @@ private fun SearchBar(
         ),
     )
 
-    // Auto-focus the search field when the screen opens
-    LaunchedEffect(Unit) {
-        focusRequester.requestFocus()
-    }
+    // LUMA: no auto-focus. The keyboard opens only when the search bar is tapped.
 }
 
 // ---------------------------------------------------------------------------
@@ -299,12 +305,15 @@ private fun SearchBar(
  */
 @Composable
 private fun RecentSearches(
+    suggestions: SearchSuggestions?,
+    onSuggestionTap: (com.stash.data.ytmusic.model.TrackSummary) -> Unit,
     entries: List<RecentSearch>,
     onTap: (RecentSearch) -> Unit,
     onRemove: (RecentSearch) -> Unit,
     onClearAll: () -> Unit,
 ) {
-    if (entries.isEmpty()) {
+    val songs = suggestions?.songs.orEmpty()
+    if (entries.isEmpty() && songs.isEmpty()) {
         EmptySearchPrompt()
         return
     }
@@ -312,7 +321,63 @@ private fun RecentSearches(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(bottom = 16.dp + LocalBottomChromePadding.current),
     ) {
-        item {
+        // LUMA: suggestions from what you listen to, before anything is typed.
+        if (songs.isNotEmpty()) {
+            item(key = "suggest-header") {
+                Column(modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 4.dp)) {
+                    Text(
+                        text = "SUGGESTED FOR YOU",
+                        style = MaterialTheme.typography.labelMedium.copy(letterSpacing = 1.2.sp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    suggestions?.basedOn?.let {
+                        Text(
+                            text = "Because you played $it",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+            items(songs, key = { "suggest:${it.videoId}" }) { t ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSuggestionTap(t) }
+                        .padding(horizontal = 20.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    coil3.compose.AsyncImage(
+                        model = t.thumbnailUrl,
+                        contentDescription = null,
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(androidx.compose.foundation.shape.RoundedCornerShape(10.dp)),
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = t.title,
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = t.artist,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
+        if (entries.isNotEmpty()) item {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -734,11 +799,7 @@ private fun TopResultCard(
                         )
                     }
                     isDownloading -> {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(24.dp),
-                            strokeWidth = 2.5.dp,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
+                        com.stash.core.ui.components.DownloadingIndicator(color = MaterialTheme.colorScheme.primary)
                     }
                     else -> {
                         IconButton(onClick = onDownload) {

@@ -13,10 +13,13 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavGraphBuilder
 import com.stash.core.ui.components.LocalBottomChromePadding
+import com.stash.core.ui.components.ambientBackdrop
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -138,8 +141,13 @@ private inline fun <reified T : Any> NavGraphBuilder.screen(
     composable<T> { entry ->
         val scope = this
         val bottom = if (behindChrome) 0.dp else LocalBottomChromePadding.current
+        val top = com.stash.core.ui.components.LocalTopInsetPadding.current
         Box(
-            modifier = Modifier.fillMaxSize().padding(bottom = bottom),
+            modifier = Modifier
+                .fillMaxSize()
+                .ambientBackdrop()
+                .padding(top = top, bottom = bottom)
+                .consumeWindowInsets(PaddingValues(top = top)),
             propagateMinConstraints = true,
         ) {
             scope.content(entry)
@@ -627,6 +635,8 @@ private fun StashNavGraph(
                 )
             },
         ) {
+            // Now Playing pads for the status bar itself (statusBarsPadding), so its
+            // frosted glass runs up behind it.
             NowPlayingScreen(
                 onDismiss = { navController.popBackStack() },
                 onNavigateToArtist = { id, name, avatar, focusAlbum ->

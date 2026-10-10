@@ -17,6 +17,8 @@ dependencies {
     implementation(project(":core:auth"))
     implementation(project(":core:common"))
     implementation(project(":core:data"))
+    // LUMA: Library ▸ + ▸ Paste Spotify playlist link reads the playlist through it.
+    implementation(project(":data:spotify"))
     implementation(project(":core:media"))
     // Artist-credit parsing: album-card display (String.primaryArtist) and
     // album/artist matching (matchesArtistCredits).

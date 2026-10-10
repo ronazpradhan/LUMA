@@ -91,9 +91,9 @@ class LosslessSourcePreferences @Inject constructor(
      * Note `catch {}` COMPLETES the flow: after an error these emit their fallback
      * once and never re-emit for the process lifetime.
      */
-    val enabled: Flow<Boolean> = context.losslessDataStore.data.map { prefs ->
-        prefs[enabledKey] ?: true
-    }.distinctUntilChanged().catch { emit(true) }
+    // LUMA: no lossless at all. Always off, whatever was stored: no Qobuz
+    // lookups, no FLAC streams or downloads, no upgrade passes.
+    val enabled: Flow<Boolean> = kotlinx.coroutines.flow.flowOf(false)
 
     suspend fun enabledNow(): Boolean = enabled.first()
 

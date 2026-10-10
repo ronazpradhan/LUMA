@@ -50,8 +50,6 @@ abstract class QbdlxModule {
     @IntoSet
     abstract fun bindQbdlxAsLosslessSource(impl: QbdlxQobuzSource): LosslessSource
 
-    @Binds
-    abstract fun bindDiscographySupplement(impl: QobuzDiscographyProvider): DiscographySupplement
 
     @Binds
     abstract fun bindQobuzAlbumFetcher(impl: QobuzAlbumFetcherImpl): QobuzAlbumFetcher
@@ -69,6 +67,11 @@ abstract class QbdlxModule {
     abstract fun bindQbdlxSigningResolver(impl: QbdlxCredentialStore): QbdlxSigningResolver
 
     companion object {
+        // LUMA: no Qobuz album supplement on artist pages (no Qobuz at all).
+        @dagger.Provides
+        fun provideDiscographySupplement(): DiscographySupplement =
+            com.stash.core.data.discography.NoopDiscographySupplement()
+
         // Stateless: the app_secret is chosen PER REQUEST by the resolver, because
         // it belongs to the connected account, not to the app — a bundled secret
         // would sign a mismatched token wrong and silently serve previews.

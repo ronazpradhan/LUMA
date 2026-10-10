@@ -33,6 +33,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.foundation.background
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
@@ -87,7 +89,32 @@ fun MiniPlayer(
             shape = shape,
             tonalElevation = if (containerColor.alpha < 0.9f) 0.dp else 2.dp,
         ) {
-            Column {
+            // LUMA: the glass mini player takes the song's colours, crossfading per song;
+            // lighter in the light theme and deeper in the dark one, so the text stays readable.
+            val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+            val toward = if (dark) androidx.compose.ui.graphics.Color.Black else androidx.compose.ui.graphics.Color.White
+            val tintA by androidx.compose.animation.animateColorAsState(
+                androidx.compose.ui.graphics.lerp(uiState.dominantColor, toward, if (dark) 0.25f else 0.45f),
+                androidx.compose.animation.core.tween(800),
+                label = "miniTintA",
+            )
+            val tintB by androidx.compose.animation.animateColorAsState(
+                androidx.compose.ui.graphics.lerp(uiState.vibrantColor, toward, if (dark) 0.35f else 0.55f),
+                androidx.compose.animation.core.tween(800),
+                label = "miniTintB",
+            )
+            val tinted = containerColor.alpha < 0.9f
+            Column(
+                modifier = if (tinted) {
+                    Modifier.background(
+                        androidx.compose.ui.graphics.Brush.horizontalGradient(
+                            listOf(tintA.copy(alpha = 0.62f), tintB.copy(alpha = 0.40f)),
+                        ),
+                    )
+                } else {
+                    Modifier
+                },
+            ) {
                 // Thin progress bar at the very top of the mini player.
                 LinearProgressIndicator(
                     progress = { uiState.progressFraction },

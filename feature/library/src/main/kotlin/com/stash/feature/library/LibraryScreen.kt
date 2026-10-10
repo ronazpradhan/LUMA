@@ -48,6 +48,8 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.HighQuality
+import androidx.compose.material.icons.filled.AudioFile
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.ImageNotSupported
 import androidx.compose.material.icons.filled.RemoveCircleOutline
 import androidx.compose.material.icons.filled.MusicNote
@@ -194,9 +196,29 @@ fun LibraryScreen(
     
 
     val followedPlaylistIds by viewModel.followedPlaylistIds.collectAsStateWithLifecycle()
+    // LUMA: import a Spotify playlist from its link.
+    val spotifyImport: SpotifyLinkImportViewModel = androidx.hilt.navigation.compose.hiltViewModel()
+    val spotifyImportState by spotifyImport.state.collectAsStateWithLifecycle()
+    var showSpotifyImport by remember { mutableStateOf(false) }
+    if (showSpotifyImport || spotifyImportState !is SpotifyImportState.Idle) {
+        SpotifyImportDialog(
+            state = spotifyImportState,
+            onImport = spotifyImport::import,
+            onOpen = { id ->
+                showSpotifyImport = false
+                spotifyImport.dismiss()
+                onNavigateToPlaylist(id)
+            },
+            onDismiss = {
+                showSpotifyImport = false
+                spotifyImport.dismiss()
+            },
+        )
+    }
     Box(modifier = modifier.fillMaxSize()) {
         LibraryContent(
             state = state,
+            onPasteSpotifyLink = { showSpotifyImport = true },
             searchQuery = searchQuery,
             importState = importState,
             onShuffleLibrary = viewModel::shuffleLibrary,
@@ -280,10 +302,7 @@ fun LibraryScreen(
             SelectionAction("play_next", com.stash.core.ui.components.playNextLabel(listenRole, "Play next"), Icons.Default.PlaylistPlay) {
                 viewModel.playSelectedNext(selectedTracks); selection.clear()
             },
-            // Lands in the selection bar's More overflow (6 > 4) — by design.
-            SelectionAction("upgrade_flac", "Upgrade to FLAC", Icons.Default.HighQuality) {
-                showFlacConfirm = true
-            },
+            // LUMA: no "Upgrade to FLAC" (no lossless).
         )
 
         if (state.activeTab == LibraryTab.TRACKS || state.activeTab == LibraryTab.LIKED) {
@@ -451,6 +470,7 @@ fun LibraryScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LibraryContent(
+    onPasteSpotifyLink: () -> Unit = {},
     state: LibraryUiState,
     /** Field-facing query — updates this frame; see LibraryViewModel.searchQuery. */
     searchQuery: String,
@@ -502,7 +522,6 @@ private fun LibraryContent(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
             .padding(top = 16.dp),
     ) {
         // -- Heading + Import action --
@@ -563,8 +582,30 @@ private fun LibraryContent(
                     tint = MaterialTheme.colorScheme.primary,
                 )
             }
-            IconButton(onClick = { importPicker.launch(arrayOf("audio/*")) }) {
-                Icon(Icons.Filled.Add, contentDescription = "Import tracks")
+            // LUMA: + offers a Spotify playlist link as well as audio files.
+            var addMenu by remember { mutableStateOf(false) }
+            Box {
+                IconButton(onClick = { addMenu = true }) {
+                    Icon(Icons.Filled.Add, contentDescription = "Add music")
+                }
+                androidx.compose.material3.DropdownMenu(expanded = addMenu, onDismissRequest = { addMenu = false }) {
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("Paste Spotify playlist link") },
+                        leadingIcon = { Icon(Icons.Filled.Link, contentDescription = null) },
+                        onClick = {
+                            addMenu = false
+                            onPasteSpotifyLink()
+                        },
+                    )
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("Import audio files") },
+                        leadingIcon = { Icon(Icons.Filled.AudioFile, contentDescription = null) },
+                        onClick = {
+                            addMenu = false
+                            importPicker.launch(arrayOf("audio/*"))
+                        },
+                    )
+                }
             }
             IconButton(onClick = { searchOpen = !searchOpen }) {
                 Icon(Icons.Filled.Search, contentDescription = "Search library")
@@ -2226,4 +2267,80 @@ private fun EmptyTabMessage(message: String) {
             color = StashTheme.extendedColors.textTertiary,
         )
     }
+}
+
+/**
+ * LUMA: paste a Spotify playlist link. Pre-fills from the clipboard when it
+ * already holds one; "Download all songs" keeps the new playlist on the phone.
+ */
+@Composable
+private fun SpotifyImportDialog(
+    state: SpotifyImportState,
+    onImport: (link: String, downloadAll: Boolean) -> Unit,
+    onOpen: (playlistId: Long) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    var link by remember {
+        mutableStateOf(
+            clipboard.getText()?.text?.takeIf { SpotifyLinkImportViewModel.playlistIdFrom(it) != null }.orEmpty(),
+        )
+    }
+    var downloadAll by remember { mutableStateOf(true) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = { if (state !is SpotifyImportState.Working) onDismiss() },
+        title = { Text(if (state is SpotifyImportState.Done) "Playlist imported" else "Import from Spotify") },
+        text = {
+            Column {
+                when (state) {
+                    is SpotifyImportState.Working -> {
+                        Text(
+                            if (state.total == 0) "Reading the playlist\u2026" else "Finding songs: ${state.done} of ${state.total}",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        androidx.compose.material3.LinearProgressIndicator(
+                            progress = { if (state.total == 0) 0f else state.done.toFloat() / state.total },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    is SpotifyImportState.Done -> Text(
+                        buildString {
+                            append("Added ${state.imported} songs to \"${state.name}\".")
+                            if (state.missed > 0) append(" ${state.missed} couldn't be found.")
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    else -> {
+                        androidx.compose.material3.OutlinedTextField(
+                            value = link,
+                            onValueChange = { link = it },
+                            singleLine = true,
+                            placeholder = { Text("https://open.spotify.com/playlist/\u2026") },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        if (state is SpotifyImportState.Failed) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(state.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Download all songs", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                            com.stash.core.ui.components.StashSwitch(checked = downloadAll, onCheckedChange = { downloadAll = it })
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            when (state) {
+                is SpotifyImportState.Working -> Unit
+                is SpotifyImportState.Done -> TextButton(onClick = { onOpen(state.playlistId) }) { Text("Open") }
+                else -> TextButton(enabled = link.isNotBlank(), onClick = { onImport(link, downloadAll) }) { Text("Import") }
+            }
+        },
+        dismissButton = {
+            if (state !is SpotifyImportState.Working) TextButton(onClick = onDismiss) { Text("Close") }
+        },
+    )
 }

@@ -121,8 +121,7 @@ fun SquidWtfCaptchaScreen(
 
     Column(
         modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
+            .fillMaxSize(),
     ) {
         // -- Top bar with close + instructions --
         Row(

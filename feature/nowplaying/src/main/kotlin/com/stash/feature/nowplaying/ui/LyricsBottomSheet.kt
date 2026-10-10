@@ -217,13 +217,6 @@ private fun LyricsHeader(
             Text(text = "Lyrics", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = "Live",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.width(6.dp))
-            com.stash.core.ui.components.StashSwitch(checked = liveEnabled, onCheckedChange = onLiveToggle)
             IconButton(onClick = onClose) { Icon(Icons.Default.Close, contentDescription = "Close") }
         }
     }

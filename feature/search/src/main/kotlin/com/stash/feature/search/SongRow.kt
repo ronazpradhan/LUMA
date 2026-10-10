@@ -244,11 +244,7 @@ fun SongRow(
                     )
                 }
                 isDownloading -> {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(24.dp),
-                        strokeWidth = 2.5.dp,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
+                    com.stash.core.ui.components.DownloadingIndicator(color = MaterialTheme.colorScheme.primary)
                 }
                 isWaitingForLossless -> {
                     // v0.9.17: deferred — lossless unavailable, fallback off.

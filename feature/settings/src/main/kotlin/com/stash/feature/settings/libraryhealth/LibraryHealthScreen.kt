@@ -125,7 +125,7 @@ fun LibraryHealthScreen(
 
         Spacer(Modifier.height(20.dp))
 
-        FlacUpgradeSection(state = flacState, onRun = flacViewModel::runNow)
+        // LUMA: no lossless, so no FLAC upgrades section.
 
         Spacer(Modifier.height(20.dp))
 

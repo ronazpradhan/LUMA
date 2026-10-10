@@ -83,29 +83,7 @@ fun SettingsPlaybackScreen(
                             onCheckedChange = viewModel::onStreamOnCellularToggle,
                         )
                     }
-                    add {
-                        SettingsToggleRow(
-                            title = "Stream via YouTube",
-                            subtitle = "Skip Qobuz and stream everything via YouTube. Turn this on if lossless playback is down or only playing short clips.",
-                            checked = forceYouTubeFallback,
-                            onCheckedChange = viewModel::setForceYouTubeFallback,
-                        )
-                    }
-                    // Force-Qobuz is a DEVELOPER instrument and is debug-only below.
-                    // Shipping one of these cost a real outage: a force toggle left on
-                    // in a release install silently disabled lossless, and the hunt for
-                    // it went as far as dex-dumping the APK. Users never see a switch
-                    // whose only effect is to break their audio.
-                    if (isDebuggableBuild) {
-                        add {
-                            SettingsToggleRow(
-                                title = "Force Qobuz only (debug)",
-                                subtitle = "Debug builds only. Routes streaming and downloads through Qobuz with no YouTube fallback.",
-                                checked = forceQbdlxOnly,
-                                onCheckedChange = viewModel::setForceQbdlxOnly,
-                            )
-                        }
-                    }
+                    // LUMA: no lossless, so no "Stream via YouTube" / "Force Qobuz" switches.
                 },
             )
         } else {

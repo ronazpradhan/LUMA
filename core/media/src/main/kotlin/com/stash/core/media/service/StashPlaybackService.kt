@@ -972,7 +972,7 @@ class StashPlaybackService : MediaLibraryService() {
             .setBufferDurationsMs(
                 /* minBufferMs = */ 30_000,
                 /* maxBufferMs = */ 60_000,
-                /* bufferForPlaybackMs = */ 1_000,
+                /* bufferForPlaybackMs = */ 500, // LUMA: was 1 s; start sooner (rebuffer stays 2 s)
                 /* bufferForPlaybackAfterRebufferMs = */ 2_000,
             )
             .build()

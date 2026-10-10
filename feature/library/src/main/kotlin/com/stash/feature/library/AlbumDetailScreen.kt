@@ -123,8 +123,7 @@ fun AlbumDetailScreen(
 
     Box(
         modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
+            .fillMaxSize(),
     ) {
         if (state.isLoading) {
             CircularProgressIndicator(

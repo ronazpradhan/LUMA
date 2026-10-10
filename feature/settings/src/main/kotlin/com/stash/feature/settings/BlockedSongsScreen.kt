@@ -59,8 +59,7 @@ fun BlockedSongsScreen(
 
     Box(
         modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
+            .fillMaxSize(),
     ) {
         if (blocked.isEmpty()) {
             // -- Empty state --

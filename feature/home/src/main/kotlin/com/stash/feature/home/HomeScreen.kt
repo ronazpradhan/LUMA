@@ -155,6 +155,9 @@ import com.stash.core.common.extensions.pluralize
  */
 private const val HOME_RAIL_LIMIT = 12
 
+/** LUMA has no lossless audio; keeps the upstream lossless UI switched off. */
+private const val LUMA_LOSSLESS = false
+
 /**
  * Home screen composable displaying a premium dark dashboard with sync
  * status, daily mixes, recently added tracks, liked songs, and playlists.
@@ -226,10 +229,17 @@ fun HomeScreen(
         }
     }
 
-    LazyColumn(
+    // LUMA: pull down to refresh Home (the YouTube Music feed).
+    val ytRefreshing by ytFeedViewModel.refreshing.collectAsStateWithLifecycle()
+    androidx.compose.material3.pulltorefresh.PullToRefreshBox(
+        isRefreshing = ytRefreshing,
+        onRefresh = { ytFeedViewModel.refresh(userPulled = true) },
         modifier = modifier
             .fillMaxSize()
             .statusBarsPadding(),
+    ) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
         // LUMA: Home scrolls under the glass bottom chrome.
         contentPadding = PaddingValues(bottom = 24.dp + LocalBottomChromePadding.current),
     ) {
@@ -281,7 +291,8 @@ fun HomeScreen(
         // Shown when the user has lossless toggled OFF and hasn't
         // dismissed. Tap routes to Settings; X dismisses forever.
         // Stacks below the Last.fm banner if both apply.
-        uiState.losslessPrompt?.let {
+        // LUMA: no lossless, so neither lossless banner is shown.
+        uiState.losslessPrompt?.takeIf { LUMA_LOSSLESS }?.let {
             item {
                 Spacer(Modifier.height(6.dp))
                 LosslessConnectBanner(
@@ -301,7 +312,7 @@ fun HomeScreen(
         // moment connecting an account is the difference between FLAC
         // and a silent YouTube fallback. Tap opens Settings › Audio;
         // X declines forever.
-        if (uiState.showLosslessOffline) {
+        if (LUMA_LOSSLESS && uiState.showLosslessOffline) {
             item {
                 Spacer(Modifier.height(6.dp))
                 LosslessOfflineBanner(
@@ -609,6 +620,7 @@ fun HomeScreen(
             }
         }
 
+    }
     }
 
     // ── Streaming privacy disclosure (first-use only) ────────────────────

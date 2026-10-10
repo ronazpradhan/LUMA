@@ -2,6 +2,11 @@ package com.stash.feature.settings
 
 import android.widget.Toast
 import androidx.compose.foundation.layout.Column
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -47,6 +52,76 @@ fun SettingsAboutScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
     SettingsScaffold(title = "About & Help", onBack = onBack, modifier = modifier) {
+        // -- LUMA (header) ------------------------------------------------------
+        val context = LocalContext.current
+        val installedVersion = remember(context) {
+            runCatching {
+                context.packageManager.getPackageInfo(context.packageName, 0).versionName
+            }.getOrNull() ?: "1.1.0"
+        }
+        val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
+
+        GlassCard {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
+            ) {
+                androidx.compose.foundation.Image(
+                    painter = androidx.compose.ui.res.painterResource(R.drawable.luma_about_mark),
+                    contentDescription = null,
+                    modifier = Modifier
+                        .size(88.dp)
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(24.dp))
+                        .background(
+                            androidx.compose.ui.graphics.Brush.radialGradient(
+                                listOf(androidx.compose.ui.graphics.Color(0xFF1E1C24), androidx.compose.ui.graphics.Color(0xFF0B0B0D)),
+                            ),
+                        ),
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "LUMA",
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = "Version $installedVersion",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Your Spotify and YouTube Music library, your way.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        // -- About ------------------------------------------------------------
+        SettingsSectionLabel("About")
+        GlassCard {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                SettingsValueRow(label = "Version", value = installedVersion)
+                Spacer(modifier = Modifier.height(8.dp))
+                SettingsValueRow(label = "Developer", value = "Ronaz Pradhan")
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Source code on GitHub",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { runCatching { uriHandler.openUri(LUMA_REPO_URL) } }
+                        .padding(vertical = 6.dp),
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                SettingsValueRow(label = "License", value = "GPL-3.0")
+                Spacer(modifier = Modifier.height(8.dp))
+                SettingsValueRow(label = "Built on", value = "Stash by Rawnald Clark")
+            }
+        }
+
         // -- Diagnostics section ----------------------------------------------
         // Crash-to-file: writes uncaught exceptions to cacheDir/crashes/ so
         // the user can attach the latest one to an email / Discord / GitHub
@@ -54,7 +129,6 @@ fun SettingsAboutScreen(
         // exist; LaunchedEffect refreshes liveness on every entry so a
         // share that resolves the issue immediately flips the button off
         // on the next screen visit.
-        val context = LocalContext.current
         LaunchedEffect(Unit) { viewModel.refreshDiagnostics() }
 
         SettingsSectionLabel("Diagnostics")
@@ -88,7 +162,7 @@ fun SettingsAboutScreen(
                         val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
                             type = "text/plain"
                             putExtra(android.content.Intent.EXTRA_STREAM, target.contentUri)
-                            putExtra(android.content.Intent.EXTRA_SUBJECT, "Stash crash report")
+                            putExtra(android.content.Intent.EXTRA_SUBJECT, "LUMA crash report")
                             addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         }
                         val chooser = android.content.Intent.createChooser(send, "Share crash report")
@@ -129,23 +203,8 @@ fun SettingsAboutScreen(
             }
         }
 
-        // -- About section ----------------------------------------------------
-        SettingsSectionLabel("About")
-
-        val installedVersion = remember(context) {
-            runCatching {
-                context.packageManager.getPackageInfo(context.packageName, 0).versionName
-            }.getOrNull() ?: "0.3.5-beta.1"
-        }
-
-        GlassCard {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                SettingsValueRow(label = "Version", value = installedVersion)
-                Spacer(modifier = Modifier.height(8.dp))
-                SettingsValueRow(label = "License", value = "GPL-3.0")
-                Spacer(modifier = Modifier.height(8.dp))
-                SettingsValueRow(label = "Based on", value = "Stash (open source)")
-            }
-        }
     }
 }
+
+/** LUMA's source (GPL-3.0 asks that it be easy to find). */
+private const val LUMA_REPO_URL = "https://github.com/ronazpradhan/LUMA"

@@ -61,8 +61,7 @@ fun FailedDownloadsScreen(
 
     Box(
         modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
+            .fillMaxSize(),
     ) {
         when {
             state.isLoading -> {

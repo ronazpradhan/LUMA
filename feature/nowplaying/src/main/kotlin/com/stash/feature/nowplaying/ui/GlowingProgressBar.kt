@@ -76,6 +76,8 @@ fun GlowingProgressBar(
     seekable: Boolean = true,
     /** Centred between the two times, so it costs no height: a listener's LIVE / Back to live. */
     center: @Composable () -> Unit = {},
+    /** LUMA: colours for the filled sweep, start to end; null keeps the accent fade. */
+    gradient: List<Color>? = null,
 ) {
     var isDragging by remember { mutableStateOf(false) }
     var dragProgress by remember { mutableFloatStateOf(progress) }
@@ -143,7 +145,7 @@ fun GlowingProgressBar(
             if (filledWidth > 0f) {
                 drawRoundRect(
                     brush = Brush.horizontalGradient(
-                        colors = listOf(
+                        colors = gradient ?: listOf(
                             accentColor.copy(alpha = 0.6f),
                             accentColor,
                         ),

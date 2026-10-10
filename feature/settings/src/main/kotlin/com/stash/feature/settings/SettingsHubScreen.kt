@@ -85,8 +85,8 @@ fun SettingsHubScreen(
             ),
             SettingsSearchItem(
                 title = "Audio & Quality",
-                subtitle = "Streaming quality, lossless, download quality",
-                keywords = listOf("bitrate", "flac", "lossless", "quality", "streaming", "wifi", "cellular"),
+                subtitle = "Streaming and download quality",
+                keywords = listOf("bitrate", "quality", "streaming", "wifi", "cellular"),
                 icon = Icons.Rounded.GraphicEq,
                 onSelect = onOpenAudioQuality,
             ),

@@ -4,7 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stash.core.data.radio.RadioSeed
 import com.stash.core.media.PlayerRepository
-import com.stash.core.model.RadioStartResult
+import com.stash.core.media.StreamRoutingResult
 import com.stash.core.model.MusicSource
 import com.stash.core.model.PlaybackSource
 import com.stash.core.model.SyncResult
@@ -17,6 +17,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -30,25 +31,43 @@ import javax.inject.Inject
 class YouTubeHomeFeedViewModel @Inject constructor(
     private val ytMusic: YTMusicApiClient,
     private val playerRepository: PlayerRepository,
+    private val listeningSuggestions: com.stash.core.data.suggest.ListeningSuggestions,
 ) : ViewModel() {
 
     private val _shelves = MutableStateFlow<List<YTHomeShelf>>(emptyList())
     val shelves: StateFlow<List<YTHomeShelf>> = _shelves.asStateFlow()
 
+    private val _refreshing = MutableStateFlow(false)
+    /** True while a pull-to-refresh is reloading the feed. */
+    val refreshing: StateFlow<Boolean> = _refreshing.asStateFlow()
+
     private var loading = false
 
     init { refresh() }
 
-    /** Re-reads the feed; a failed read keeps the rows already shown. */
-    fun refresh() {
+    /** Re-reads the feed; a failed read keeps the rows already shown. [userPulled] shows the spinner. */
+    fun refresh(userPulled: Boolean = false) {
         if (loading) return
         loading = true
+        if (userPulled) _refreshing.value = true
         viewModelScope.launch {
             try {
-                val feed = runCatching { ytMusic.getHomeFeed() }.getOrDefault(emptyList())
+                val feed = kotlinx.coroutines.coroutineScope {
+                    val home = async { runCatching { ytMusic.getHomeFeed() }.getOrDefault(emptyList()) }
+                    val picks = async { runCatching { listeningSuggestions.load() }.getOrNull() }
+                    // LUMA: "Suggested for you" from what you listen to leads the feed; it is
+                    // re-picked on every refresh, so a pull always brings new songs.
+                    val suggested = picks.await()?.takeIf { it.basedOn != null && it.songs.isNotEmpty() }?.let { s ->
+                        YTHomeShelf("Suggested for you", s.songs.map { YTHomeItem.Song(it) })
+                    }
+                    listOfNotNull(suggested) + home.await().map { shelf ->
+                        if (userPulled) shelf.copy(items = shelf.items.shuffled()) else shelf
+                    }
+                }
                 if (feed.isNotEmpty()) _shelves.value = feed
             } finally {
                 loading = false
+                _refreshing.value = false
             }
         }
     }
@@ -65,13 +84,15 @@ class YouTubeHomeFeedViewModel @Inject constructor(
 
     private suspend fun playSong(item: YTHomeItem.Song) {
         val t = item.track
-        val radio = runCatching {
-            playerRepository.startRadio(RadioSeed.Song(t.title, t.artist, t.videoId), keepCurrent = false)
-        }.getOrNull()
-        if (radio != RadioStartResult.Started) {
-            playerRepository.playFromStream(
-                TrackItem(t.videoId, t.title, t.artist, t.durationSeconds, t.thumbnailUrl, t.album),
-            )
+        // Play the song first, then build its radio behind it: building the
+        // radio before playing cost a second or two on every tap.
+        val played = playerRepository.playFromStream(
+            TrackItem(t.videoId, t.title, t.artist, t.durationSeconds, t.thumbnailUrl, t.album),
+        )
+        if (played is StreamRoutingResult.Item) {
+            runCatching {
+                playerRepository.startRadio(RadioSeed.Song(t.title, t.artist, t.videoId), keepCurrent = true)
+            }
         }
     }
 

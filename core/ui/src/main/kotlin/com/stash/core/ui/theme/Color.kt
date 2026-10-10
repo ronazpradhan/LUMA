@@ -31,10 +31,10 @@ val StashAmoledSurfaceHigh = Color(0xFF14141E)
 val StashTextPrimary = Color(0xFFE8E8F0)
 val StashTextSecondary = Color(0xFFA0A0B8)
 val StashTextTertiary = Color(0xFF606078)
-val StashGlassBackground = Color(0x0AFFFFFF)
-val StashGlassBackgroundHover = Color(0x14FFFFFF)
-val StashGlassBorder = Color(0x0FFFFFFF)
-val StashGlassBorderBright = Color(0x24FFFFFF)
+val StashGlassBackground = Color(0x17FFFFFF)        // LUMA: frosted pane over the ambient glow
+val StashGlassBackgroundHover = Color(0x24FFFFFF)
+val StashGlassBorder = Color(0x1FFFFFFF)
+val StashGlassBorderBright = Color(0x38FFFFFF)
 
 // ── Light theme palette (cream / lavender, preserves brand purple) ─────────
 //
@@ -47,9 +47,9 @@ val StashElevatedSurfaceLight = Color(0xFFEEE7FC)  // subtle purple wash for rai
 val StashTextPrimaryLight = Color(0xFF1A0B2E)      // deep aubergine, high contrast
 val StashTextSecondaryLight = Color(0xFF5B4680)    // muted purple-gray for secondary text
 val StashTextTertiaryLight = Color(0xFF8B7AB0)     // lightest tier, for metadata
-val StashGlassBackgroundLight = Color(0x0F7C3AED)  // 6% purple tint on white
-val StashGlassBackgroundHoverLight = Color(0x1A7C3AED)
-val StashGlassBorderLight = Color(0x1F7C3AED)      // 12% purple for subtle borders
+val StashGlassBackgroundLight = Color(0x8CFFFFFF)  // LUMA: 55% white, frosted over the lavender glow
+val StashGlassBackgroundHoverLight = Color(0xB3FFFFFF)
+val StashGlassBorderLight = Color(0xCCFFFFFF)      // LUMA: bright white rim, like iOS glass
 val StashGlassBorderBrightLight = Color(0x337C3AED)
 
 @Immutable

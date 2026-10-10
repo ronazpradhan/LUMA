@@ -73,9 +73,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
+import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Lyrics
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.foundation.border
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
@@ -152,6 +161,17 @@ fun NowPlayingScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val track = uiState.currentTrack
+    // LUMA: the player's glass and accents follow the album art, crossfading per song.
+    val dynTint by androidx.compose.animation.animateColorAsState(
+        targetValue = uiState.dominantColor,
+        animationSpec = androidx.compose.animation.core.tween(800),
+        label = "npTint",
+    )
+    val dynAccent by androidx.compose.animation.animateColorAsState(
+        targetValue = androidx.compose.ui.graphics.lerp(uiState.vibrantColor, Color.White, 0.22f),
+        animationSpec = androidx.compose.animation.core.tween(800),
+        label = "npAccent",
+    )
     val resolvingArtist by viewModel.resolvingArtist.collectAsStateWithLifecycle()
     val isDownloadingCurrent by viewModel.isDownloadingCurrent.collectAsStateWithLifecycle()
     val exportingLyricsTrackId by viewModel.exportingLyricsTrackId.collectAsStateWithLifecycle()
@@ -506,7 +526,7 @@ fun NowPlayingScreen(
                     androidx.compose.foundation.layout.Spacer(
                         modifier = Modifier.height(4.dp),
                     )
-                    if (!track.isFlac) {
+                    if (false && !track.isFlac) { // LUMA: no "Find in FLAC" (no lossless)
                         androidx.compose.material3.OutlinedButton(
                             onClick = {
                                 viewModel.findInFlacForCurrentTrack()
@@ -559,6 +579,7 @@ fun NowPlayingScreen(
         )
     }
 
+    NpGlassTheme {
     Box(
         modifier = Modifier
             .holdHeightWhileLeaving()
@@ -587,11 +608,24 @@ fun NowPlayingScreen(
             )
         }
 
+        // LUMA: the whole player is one sheet of frosted glass: the album art,
+        // full-screen and heavily blurred, under a frost tint, with every control
+        // sitting straight on it (no separate capsules).
+        FrostedArtBackdrop(
+            artModel = track?.albumArtPath ?: track?.albumArtUrl,
+            tint = dynTint,
+            modifier = Modifier.fillMaxSize(),
+        )
+
         // The raw navigation-bar inset (never consumed by the scaffold here), so the
         // controls sit above the gesture handle or the 3-button bar and do not move
         // while the screen slides away.
         val navBarInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-        Column(modifier = Modifier.fillMaxSize().padding(bottom = navBarInset)) {
+        // LUMA: the player is one screen tall; scroll down past it for the live lyrics.
+        androidx.compose.foundation.layout.BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val pageHeight = maxHeight
+        Column(modifier = Modifier.fillMaxSize().verticalScroll(androidx.compose.foundation.rememberScrollState())) {
+        Column(modifier = Modifier.fillMaxWidth().height(pageHeight).padding(bottom = navBarInset)) {
             // #333 v2 — the slot system. No estimated heights, no thresholds:
             // the title/progress/controls stack is FIXED and anchors to the
             // bottom of the column (directly above the lyrics bar when it's
@@ -610,6 +644,28 @@ fun NowPlayingScreen(
                     .padding(horizontal = 24.dp),
                 top = {
                 // -- Top bar: dismiss, radio, more (options sheet) --
+                Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                // LUMA: the sleep timer sits beside the close arrow.
+                if (uiState.hasTrack) {
+                    val sleepTimerActive = sleepTimerState != SleepTimerController.State.Off
+                    IconButton(
+                        onClick = { showSleepTimerSheet = true },
+                        modifier = Modifier.align(Alignment.CenterStart).padding(start = 48.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Bedtime,
+                            contentDescription = if (sleepTimerActive) "Sleep timer active" else "Set sleep timer",
+                            tint = if (sleepTimerActive) dynAccent else npInk(),
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
+                }
+                Text(
+                    text = "Now Playing",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = npInk(),
+                )
                 TopBar(
                     onDismiss = onDismiss,
                     onMoreClick = { showOptionsSheet = true },
@@ -625,9 +681,9 @@ fun NowPlayingScreen(
                     onStartRadio = viewModel::startRadioFromCurrent,
                     onStopRadio = viewModel::stopRadio,
                     // No radio in a session, for host or listener: the room owns the queue.
-                    showRadio = room == null,
+                    showRadio = false, // LUMA: no radio button; autoplay keeps the music going like YouTube Music
                     // Nor the queue: the sheet would show the user's own queue, which the room set aside.
-                    showQueueButton = room == null,
+                    showQueueButton = false, // LUMA: Up Next's "See all" opens the queue
                     accentColor = npAccent(uiState.vibrantColor),
                     // Cast and Listen Together exclude each other (cast spec §3).
                     castButton = {
@@ -641,6 +697,7 @@ fun NowPlayingScreen(
                         }
                     },
                 )
+                }
                 if (room != null) {
                     com.stash.feature.nowplaying.listen.SessionBar(
                         room = room,
@@ -652,13 +709,37 @@ fun NowPlayingScreen(
                 },
                 art = {
                 // -- Album art: NowPlayingBody sizes this slot (a square) --
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize(),
+                    contentAlignment = Alignment.Center,
+                ) {
                     AlbumArtSection(
                         albumArtUrl = track?.albumArtUrl,
                         albumArtPath = track?.albumArtPath,
                         accentColor = npAccent(uiState.vibrantColor),
                         onBitmapLoaded = viewModel::onAlbumArtLoaded,
                     )
+                    if (track != null) {
+                        // LUMA: the like heart floats on the art, on a small glass disc.
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(12.dp)
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.18f))
+                                .border(1.dp, Color.White.copy(alpha = 0.35f), CircleShape),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            com.stash.core.ui.components.LikeButton(
+                                isLiked = track.stashLikedAt != null,
+                                onTap = viewModel::onLikeTap,
+                                unlikedTint = Color.White,
+                                size = 22.dp,
+                            )
+                        }
+                    }
                     if (room != null) {
                         // "Maya joined", "Rawn skipped": over the art, so the layout never shifts.
                         com.stash.feature.nowplaying.listen.SessionEventChip(together.events, room.myId, Modifier.align(Alignment.TopCenter))
@@ -666,145 +747,74 @@ fun NowPlayingScreen(
                 }
                 },
                 stack = {
-                // -- Track info -- (tap the title/artist to open the artist
-                // profile; the trailing chevron signals it's actionable, and
-                // swaps to a spinner while the artist name is being resolved).
-                // The like heart floats at the right edge (relocated out of the
-                // crowded top icon row); symmetric horizontal padding keeps the
-                // title/artist block optically centred under the album art.
-                Box(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 40.dp)
-                        .then(
-                            if (track != null) {
-                                Modifier.clickable(enabled = !resolvingArtist) {
-                                    viewModel.onTrackInfoTapped()
-                                }
-                            } else {
-                                Modifier
-                            },
-                        ),
-                    horizontalAlignment = Alignment.CenterHorizontally,
+                // -- Track info (LUMA): title and artist on the left (tap for the
+                // artist page), the quality badge on the right.
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically,
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .then(
+                                if (track != null) {
+                                    Modifier.clickable(enabled = !resolvingArtist) { viewModel.onTrackInfoTapped() }
+                                } else {
+                                    Modifier
+                                },
+                            ),
                     ) {
-                        // A long title scrolls instead of ending in "…": every
-                        // character is worth more than an ellipsis here, and the
-                        // width the format badge used to take beside it now
-                        // belongs to the title — QualityLine below already says
-                        // FLAC and the bit depth, so the badge said it twice.
                         Text(
                             text = track?.title ?: "Not Playing",
-                            fontSize = 22.sp,
+                            fontSize = 24.sp,
                             fontWeight = FontWeight.Bold,
                             color = npInk(),
                             maxLines = 1,
                             softWrap = false,
                             overflow = TextOverflow.Clip,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier
-                                .weight(1f, fill = false)
-                                .basicMarquee(iterations = Int.MAX_VALUE),
+                            modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE),
                         )
-                        if (track != null) {
-                            Spacer(modifier = Modifier.width(6.dp))
-                            if (resolvingArtist) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(16.dp),
-                                    strokeWidth = 2.dp,
-                                    color = npInk(),
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = "Open artist",
-                                    tint = npInk().copy(alpha = 0.6f),
-                                    modifier = Modifier.size(18.dp),
-                                )
-                            }
-                        }
+                        Spacer(modifier = Modifier.height(StackRhythm.TitleToArtist))
+                        Text(
+                            text = track?.artist?.primaryArtist().orEmpty(),
+                            fontSize = 15.sp,
+                            color = npInk().copy(alpha = 0.7f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
-
-                    Spacer(modifier = Modifier.height(StackRhythm.TitleToArtist))
-
-                    // Collapse collaboration credits to the lead act
-                    // ("Metro Boomin, Travis Scott" → "Metro Boomin"), and
-                    // remember the split — this Text recomposes with every
-                    // player-state change.
-                    val displayArtist = remember(track) { track?.artist?.primaryArtist() }
-                    Text(
-                        text = buildString {
-                            if (track != null && displayArtist != null) {
-                                append(displayArtist)
-                                if (track.album.isNotBlank()) {
-                                    append(" \u2022 ")
-                                    append(track.album)
-                                }
-                            }
-                        },
-                        fontSize = 15.sp,
-                        color = npInk().copy(alpha = 0.7f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-                    // Sleep timer — floated to the leading edge, mirroring the
-                    // Like heart's placement on the trailing edge. Accented
-                    // while a timer is armed so the state is visible at a
-                    // glance without opening the sheet.
                     if (track != null) {
-                        val sleepTimerActive = sleepTimerState != SleepTimerController.State.Off
-                        androidx.compose.material3.IconButton(
-                            onClick = { showSleepTimerSheet = true },
-                            modifier = Modifier
-                                .align(Alignment.CenterStart)
-                                .size(26.dp),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Bedtime,
-                                contentDescription = if (sleepTimerActive) "Sleep timer active" else "Set sleep timer",
-                                tint = if (sleepTimerActive) npAccent(uiState.vibrantColor) else npInk().copy(alpha = 0.7f),
-                                modifier = Modifier.size(20.dp),
+                        Spacer(modifier = Modifier.width(12.dp))
+                        val badge = trackQualityText(track)?.substringBefore(' ')?.substringBefore('·')?.trim()
+                        if (resolvingArtist) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = npInk())
+                        } else if (!badge.isNullOrBlank()) {
+                            Text(
+                                text = badge.uppercase(),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color.White.copy(alpha = 0.14f))
+                                    .border(1.dp, dynAccent.copy(alpha = 0.8f), RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
                             )
                         }
-                    }
-
-                    // Like heart — the sole action left inline, floated to the
-                    // trailing edge and vertically centred against the
-                    // title/artist block. Share/Queue/Save/Download/Flag all
-                    // moved into the "More" options sheet.
-                    if (track != null) {
-                        com.stash.core.ui.components.LikeButton(
-                            isLiked = uiState.currentTrack?.stashLikedAt != null,
-                            onTap = viewModel::onLikeTap,
-                            unlikedTint = npInk().copy(alpha = 0.7f),
-                            size = 26.dp,
-                            modifier = Modifier.align(Alignment.CenterEnd),
-                        )
-                    }
-                }   
-
-                // Quality line — codec + bit-depth/sample-rate + bitrate, when known.
-                // Sized smaller than the artist/album line; degrades gracefully when
-                // some fields are missing (returns a partial line, not nothing).
-                // When the active MediaItem is sourced from an http(s) URI (Kennyy
-                // stream rather than a local file), a small wifi glyph prefixes
-                // the line so the user knows playback is using their connection.
-                if (track != null) {
-                    val qualityText = trackQualityText(track)
-                    if (qualityText != null) {
-                        Spacer(modifier = Modifier.height(StackRhythm.ArtistToQuality))
-                        QualityLine(
-                            qualityText = qualityText,
-                            isStreaming = uiState.isStreaming,
-                        )
+                        // LUMA: download right beside the quality badge.
+                        Box(modifier = Modifier.size(44.dp), contentAlignment = Alignment.Center) {
+                            if (isDownloadingCurrent) {
+                                com.stash.core.ui.components.DownloadingIndicator(color = npInk())
+                            } else {
+                                IconButton(onClick = viewModel::toggleDownloadForCurrentTrack) {
+                                    Icon(
+                                        imageVector = if (track.isDownloaded) Icons.Default.DownloadDone else Icons.Default.Download,
+                                        contentDescription = if (track.isDownloaded) "Remove download" else "Download",
+                                        tint = if (track.isDownloaded) dynAccent else npInk().copy(alpha = 0.85f),
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -815,7 +825,7 @@ fun NowPlayingScreen(
                 // -- Progress bar --
                 GlowingProgressBar(
                     progress = uiState.progressFraction,
-                    accentColor = npAccent(uiState.vibrantColor),
+                    accentColor = dynAccent,
                     elapsedMs = uiState.currentPositionMs,
                     totalMs = uiState.durationMs,
                     onSeek = viewModel::onSeekTo,
@@ -843,7 +853,7 @@ fun NowPlayingScreen(
                         isBuffering = uiState.isBuffering,
                         shuffleEnabled = uiState.shuffleEnabled,
                         repeatMode = uiState.repeatMode,
-                        accentColor = npAccent(uiState.vibrantColor),
+                        accentColor = dynAccent,
                         onPlayPauseClick = viewModel::onPlayPauseClick,
                         onSkipNext = viewModel::onSkipNext,
                         onSkipPrevious = viewModel::onSkipPrevious,
@@ -855,24 +865,52 @@ fun NowPlayingScreen(
                     )
                 }
 
+
                 },
             )
 
-            // Live-lyrics bar — sits exactly where the MiniPlayer is on other
-            // screens (the scaffold hides MiniPlayer on this route), directly
-            // above the nav bar. Zero-height when Hidden, so the content
-            // column keeps the full screen for lyric-less tracks.
-            LiveLyricsBar(
+            // LUMA: Up Next, a glass card with the next song (tap to skip to it)
+            // and "See all" for the queue. Not in a Listen Together room, which
+            // owns the queue.
+            val nextTrack = uiState.queue.getOrNull(uiState.currentIndex + 1)
+            if (room == null && nextTrack != null) {
+                UpNextCard(
+                    track = nextTrack,
+                    accent = dynAccent,
+                    onPlay = viewModel::onSkipNext,
+                    onSeeAll = { showQueue = true },
+                )
+            }
+            // The cue that lyrics wait below.
+            if (track != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 4.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, tint = npInk().copy(alpha = 0.55f), modifier = Modifier.size(18.dp))
+                    Text("Lyrics", fontSize = 12.sp, color = npInk().copy(alpha = 0.55f))
+                }
+            }
+        }
+        if (track != null) {
+            NpLyricsSection(
                 state = lyricsState,
-                currentPositionMs = lyricsPositionMs,
-                accentColor = npAccent(uiState.vibrantColor),
-                liveEnabled = liveLyricsEnabled,
-                onTap = viewModel::onShowLyrics,
+                positionMs = lyricsPositionMs,
                 isPlaying = uiState.isPlaying && !uiState.isBuffering,
                 playbackSpeed = playbackSpeed,
+                onSeek = viewModel::onSeekTo,
+                onRetry = viewModel::onLyricsRetry,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(pageHeight * 0.88f)
+                    .padding(bottom = navBarInset),
             )
         }
+        }
+        }
         if (room != null) com.stash.feature.nowplaying.listen.FloatingReactions(together.reactions, animate = ambientAnimationEnabled, modifier = Modifier.fillMaxSize())
+    }
     }
 
     if (showOptionsSheet && track != null) {
@@ -901,6 +939,226 @@ fun NowPlayingScreen(
 // ---------------------------------------------------------------------------
 // Layout
 // ---------------------------------------------------------------------------
+
+/**
+ * LUMA: Now Playing's frosted glass. The cover fills the screen, scaled up and
+ * blurred until only its colours are left, then a frost tint (milky white in the
+ * light theme, smoky in the dark) evens it out so text stays readable. Crossfades
+ * with the track. Android 11 and older can't blur, so there the cover only
+ * tints faintly over the ambient underneath.
+ */
+@Composable
+private fun FrostedArtBackdrop(artModel: Any?, tint: Color, modifier: Modifier = Modifier) {
+    val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val canBlur = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S
+    Box(modifier) {
+        androidx.compose.animation.Crossfade(
+            targetState = artModel,
+            animationSpec = androidx.compose.animation.core.tween(800),
+            label = "frostedArt",
+        ) { model ->
+            if (model != null) {
+                AsyncImage(
+                    model = model,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    // Richer colour, so the glass reads tinted instead of grey.
+                    colorFilter = androidx.compose.ui.graphics.ColorFilter.colorMatrix(
+                        androidx.compose.ui.graphics.ColorMatrix().apply { setToSaturation(1.6f) },
+                    ),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            scaleX = 1.35f
+                            scaleY = 1.35f
+                            alpha = if (canBlur) 0.95f else 0.22f
+                        }
+                        .blur(90.dp, androidx.compose.ui.draw.BlurredEdgeTreatment.Rectangle),
+                )
+            }
+        }
+        // Frost tinted with the cover's own dominant colour, deepening toward
+        // the bottom so the controls stay readable on any cover.
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        0f to androidx.compose.ui.graphics.lerp(tint, Color.Black, 0.15f).copy(alpha = 0.55f),
+                        0.5f to androidx.compose.ui.graphics.lerp(tint, Color.Black, 0.35f).copy(alpha = 0.60f),
+                        1f to androidx.compose.ui.graphics.lerp(tint, Color.Black, 0.55f).copy(alpha = 0.78f),
+                    ),
+                ),
+        )
+    }
+}
+
+private val NpIndigoDeep = Color(0xFF0D0C12)
+private val NpViolet = Color(0xFFB794F6)
+
+/**
+ * LUMA: the player always wears its own deep-indigo glass, whatever the app
+ * theme: a dark scheme for everything drawn on it (the sheets it opens keep
+ * the app theme, as they are drawn outside this).
+ */
+@Composable
+private fun NpGlassTheme(content: @Composable () -> Unit) {
+    MaterialTheme(
+        colorScheme = MaterialTheme.colorScheme.copy(
+            background = NpIndigoDeep,
+            surface = Color(0xFF1C1745),
+            surfaceVariant = Color(0xFF2A2458),
+            onBackground = Color.White,
+            onSurface = Color.White,
+            onSurfaceVariant = Color(0xFFD8D1FF),
+        ),
+        typography = MaterialTheme.typography,
+        shapes = MaterialTheme.shapes,
+        content = content,
+    )
+}
+
+/**
+ * LUMA: a music visualizer, bars rising and falling just past the art's left
+ * and right edges (the art covers the middle). Still while paused.
+ */
+@Composable
+private fun Modifier.visualizerBars(playing: Boolean, color: Color): Modifier {
+    val transition = androidx.compose.animation.core.rememberInfiniteTransition(label = "visualizer")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = (2 * Math.PI).toFloat(),
+        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+            androidx.compose.animation.core.tween(1600, easing = androidx.compose.animation.core.LinearEasing),
+        ),
+        label = "visualizerPhase",
+    )
+    val level by androidx.compose.animation.core.animateFloatAsState(if (playing) 1f else 0.25f, label = "visualizerLevel")
+    return this.drawBehind {
+        val barW = 4.dp.toPx()
+        val gap = 5.dp.toPx()
+        val reach = 26.dp.toPx()
+        val count = (reach / (barW + gap)).toInt().coerceAtLeast(3)
+        val midY = size.height / 2f
+        for (side in 0..1) {
+            for (i in 0 until count) {
+                val x = if (side == 0) -reach + i * (barW + gap) else size.width + gap + i * (barW + gap)
+                val wave = (kotlin.math.sin(phase * (1 + i % 3) + i * 1.3f + side * 2f) + 1f) / 2f
+                val h = size.height * (0.18f + 0.42f * wave * level) * (1f - 0.12f * i)
+                drawRoundRect(
+                    brush = Brush.verticalGradient(
+                        listOf(color.copy(alpha = 0.10f), color.copy(alpha = 0.55f), color.copy(alpha = 0.10f)),
+                        startY = midY - h / 2f,
+                        endY = midY + h / 2f,
+                    ),
+                    topLeft = androidx.compose.ui.geometry.Offset(x, midY - h / 2f),
+                    size = androidx.compose.ui.geometry.Size(barW, h),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(barW / 2f),
+                )
+            }
+        }
+    }
+}
+
+/** LUMA: live lyrics, right on the player's glass below the controls; always live, no switch. */
+@Composable
+private fun NpLyricsSection(
+    state: com.stash.feature.nowplaying.ui.LyricsViewState,
+    positionMs: Long,
+    isPlaying: Boolean,
+    playbackSpeed: Float,
+    onSeek: (Long) -> Unit,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier.padding(horizontal = 8.dp)) {
+        Text(
+            "Lyrics",
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color.White,
+            modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp),
+        )
+        Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+            when (state) {
+                com.stash.feature.nowplaying.ui.LyricsViewState.Loading ->
+                    com.stash.feature.nowplaying.ui.CenteredSpinner("Fetching lyrics\u2026")
+                is com.stash.feature.nowplaying.ui.LyricsViewState.Synced -> com.stash.feature.nowplaying.ui.LyricsSyncedRenderer(
+                    lines = state.lines,
+                    currentPositionMs = positionMs,
+                    onLineTap = onSeek,
+                    syllables = state.syllables,
+                    isPlaying = isPlaying,
+                    playbackSpeed = playbackSpeed,
+                )
+                is com.stash.feature.nowplaying.ui.LyricsViewState.Plain ->
+                    com.stash.feature.nowplaying.ui.LyricsPlainRenderer(state.text)
+                com.stash.feature.nowplaying.ui.LyricsViewState.Instrumental ->
+                    com.stash.feature.nowplaying.ui.CenteredPlacard("\u266A Instrumental")
+                com.stash.feature.nowplaying.ui.LyricsViewState.None ->
+                    com.stash.feature.nowplaying.ui.CenteredPlacard(label = "No lyrics found", action = "Retry", onAction = onRetry)
+                is com.stash.feature.nowplaying.ui.LyricsViewState.Error ->
+                    com.stash.feature.nowplaying.ui.CenteredPlacard(
+                        label = "Couldn't load lyrics",
+                        action = if (state.retryable) "Retry" else null,
+                        onAction = onRetry,
+                    )
+            }
+        }
+    }
+}
+
+/** LUMA: the next song, on a glass card at the foot of the player. */
+@Composable
+private fun UpNextCard(
+    track: com.stash.core.model.Track,
+    accent: Color,
+    onPlay: () -> Unit,
+    onSeeAll: () -> Unit,
+) {
+    val shape = RoundedCornerShape(22.dp)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .clip(shape)
+            .background(Color.White.copy(alpha = 0.10f))
+            .border(
+                1.dp,
+                Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.28f), Color.White.copy(alpha = 0.06f))),
+                shape,
+            )
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Up Next", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color.White, modifier = Modifier.weight(1f))
+            Text(
+                "See all",
+                fontSize = 13.sp,
+                color = Color.White.copy(alpha = 0.7f),
+                modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onSeeAll).padding(6.dp),
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(onClick = onPlay),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AsyncImage(
+                model = track.albumArtPath ?: track.albumArtUrl,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)).background(Color.White.copy(alpha = 0.08f)),
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(track.title, fontSize = 15.sp, fontWeight = FontWeight.Medium, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(track.artist, fontSize = 13.sp, color = Color.White.copy(alpha = 0.65f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Icon(Icons.Default.GraphicEq, contentDescription = null, tint = accent, modifier = Modifier.size(22.dp))
+        }
+    }
+}
 
 /** The fixed steps inside the title-to-controls stack. */
 private object StackRhythm {
@@ -1258,14 +1516,18 @@ private fun PlaybackControls(
         // COMMAND_PLAY_PAUSE is valid during STATE_BUFFERING).
         IconButton(
             onClick = onPlayPauseClick,
+            // LUMA: a frosted glass disc with a violet glow, not a solid accent circle.
             modifier = Modifier
-                .size(64.dp)
+                .size(76.dp)
+                .shadow(elevation = 24.dp, shape = CircleShape, ambientColor = accentColor, spotColor = accentColor)
+                .clip(CircleShape)
                 .background(
-                    brush = Brush.linearGradient(
-                        colors = listOf(accentColor, accentColor.copy(alpha = 0.7f)),
+                    brush = Brush.verticalGradient(
+                        colors = listOf(Color.White.copy(alpha = 0.32f), Color.White.copy(alpha = 0.12f)),
                     ),
                     shape = CircleShape,
-                ),
+                )
+                .border(1.5.dp, Color.White.copy(alpha = 0.45f), CircleShape),
         ) {
             // On the accent-gradient circle, not the ambient ground — stays
             // white in both themes (the accent is contrast-adjusted instead).
@@ -1465,14 +1727,11 @@ private fun NowPlayingOptionsSheet(
                     .align(Alignment.CenterHorizontally)
             )
 
-            // Listen Together: Start, or the Session sheet (invite, leave, end) once in a room.
-            when (together) {
-                is ListenTogetherState.InRoom ->
-                    SheetOptionRow(icon = Icons.Default.Groups, label = "Listening together", onClick = { onOpenSession(); onDismiss() })
-                is ListenTogetherState.Connecting -> SheetOptionRow(icon = Icons.Default.Groups, label = "Connecting…", onClick = onDismiss)
-                ListenTogetherState.Idle -> SheetOptionRow(icon = Icons.Default.Groups, label = "Listen together", onClick = { onStartTogether(); onDismiss() })
+            // LUMA: no "Listen together" to start; only a session already running shows here.
+            if (together is ListenTogetherState.InRoom) {
+                SheetOptionRow(icon = Icons.Default.Groups, label = "Listening together", onClick = { onOpenSession(); onDismiss() })
+                Spacer(modifier = Modifier.height(8.dp))
             }
-            Spacer(modifier = Modifier.height(8.dp))
 
             // Save to Playlist
             SheetOptionRow(
@@ -1484,17 +1743,7 @@ private fun NowPlayingOptionsSheet(
                 }
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Share song
-            SheetOptionRow(
-                icon = Icons.Default.Share,
-                label = "Share song",
-                onClick = {
-                    onShareClick()
-                    onDismiss()
-                }
-            )
+            // LUMA: no "Share song".
 
             // Post to Community (only while Community is on)
             if (onPostToCommunity != null) {

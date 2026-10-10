@@ -11,3 +11,6 @@ import androidx.compose.ui.unit.dp
  * clear of it; every other screen is padded by it from outside.
  */
 val LocalBottomChromePadding = staticCompositionLocalOf<Dp> { 0.dp }
+
+/** LUMA: the status-bar inset, applied inside each screen so its ambient backdrop runs up behind the status bar. */
+val LocalTopInsetPadding = staticCompositionLocalOf<Dp> { 0.dp }
