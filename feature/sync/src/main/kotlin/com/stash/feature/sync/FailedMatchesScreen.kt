@@ -1,0 +1,815 @@
+package com.stash.feature.sync
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil3.compose.AsyncImage
+import com.stash.core.data.db.dao.UnmatchedTrackView
+import com.stash.core.media.preview.PreviewState
+import com.stash.core.ui.theme.StashTheme
+
+/**
+ * Screen displaying tracks that could not be matched on YouTube during sync.
+ *
+ * Users can review unmatched songs, trigger a resync to find new candidates,
+ * preview and approve matches, or dismiss individual tracks so they are no
+ * longer retried on future syncs. A confirmation dialog prevents accidental
+ * dismissals.
+ *
+ * @param onBack   Callback invoked when the back arrow is tapped.
+ * @param viewModel Injected via Hilt; provides unmatched track data.
+ */
+@Composable
+fun FailedMatchesScreen(
+    onBack: () -> Unit,
+    viewModel: FailedMatchesViewModel = hiltViewModel(),
+) {
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val previewState by viewModel.previewState.collectAsStateWithLifecycle()
+    val extendedColors = StashTheme.extendedColors
+
+    // Track pending dismiss confirmation dialog.
+    var trackToDismiss by remember { mutableStateOf<UnmatchedTrackView?>(null) }
+
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(Unit) {
+        viewModel.userMessages.collect { snackbarHostState.showSnackbar(it) }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+    ) {
+        when {
+            // -- Loading state --
+            state.isLoading -> {
+                CircularProgressIndicator(
+                    modifier = Modifier.align(Alignment.Center),
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+
+            // -- Empty state: all caught up --
+            state.tracks.isEmpty() && state.flaggedTracks.isEmpty() -> {
+                // Back button pinned to top-left
+                IconButton(
+                    onClick = onBack,
+                    modifier = Modifier
+                        .statusBarsPadding()
+                        .padding(start = 8.dp, top = 8.dp)
+                        .align(Alignment.TopStart)
+                        .size(48.dp)
+                        .background(
+                            color = extendedColors.glassBackground,
+                            shape = CircleShape,
+                        ),
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+
+                // Centered empty message
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(horizontal = 32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        modifier = Modifier.size(72.dp),
+                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.4f),
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Text(
+                        text = "All caught up!",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onBackground,
+                    )
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    Text(
+                        text = "No unmatched songs.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            // -- Content: header + track list --
+            else -> {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(bottom = 120.dp),
+                ) {
+                    // -- Header --
+                    item(key = "header") {
+                        FailedMatchesHeader(
+                            trackCount = state.tracks.size,
+                            flaggedCount = state.flaggedTracks.size,
+                            isResyncing = state.isResyncing,
+                            resyncProgress = state.resyncProgress,
+                            resyncCandidateCount = state.resyncCandidates.size,
+                            onBack = onBack,
+                            onResync = { viewModel.resync() },
+                            onApproveAll = { viewModel.approveAll() },
+                            onDismissAll = { viewModel.dismissAll() },
+                        )
+                    }
+
+                    // -- Track list --
+                    itemsIndexed(
+                        items = state.tracks,
+                        key = { _, track -> track.id },
+                    ) { index, track ->
+                        val candidate = state.resyncCandidates[track.trackId]
+                        val isPreviewPlaying = previewState is PreviewState.Playing &&
+                            (previewState as PreviewState.Playing).videoId == candidate?.videoId
+                        val isPreviewLoading = state.previewLoading == candidate?.videoId
+
+                        UnmatchedTrackRow(
+                            track = track,
+                            candidate = candidate,
+                            resyncAttempted = state.resyncProgress.isNotEmpty(),
+                            isPreviewPlaying = isPreviewPlaying,
+                            isPreviewLoading = isPreviewLoading,
+                            onPreview = { videoId -> viewModel.previewRejectedMatch(videoId) },
+                            onStopPreview = { viewModel.stopPreview() },
+                            onApprove = {
+                                candidate?.let {
+                                    viewModel.approveMatch(track.trackId, track.id, it)
+                                }
+                            },
+                            onDismiss = { trackToDismiss = track },
+                        )
+
+                        // Subtle divider between rows (skip after last item).
+                        if (index < state.tracks.lastIndex) {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(start = 80.dp, end = 20.dp),
+                                thickness = 0.5.dp,
+                                color = extendedColors.glassBorder,
+                            )
+                        }
+                    }
+
+                    // -- Flagged-as-wrong-match section --
+                    // User-flagged (via Now Playing overflow) tracks that
+                    // downloaded fine but play the wrong song. Same resync
+                    // + preview infrastructure; approve SWAPS the file
+                    // rather than downloading fresh.
+                    if (state.flaggedTracks.isNotEmpty()) {
+                        item(key = "flagged_header") {
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Column(modifier = Modifier.padding(horizontal = 20.dp)) {
+                                Text(
+                                    text = "You flagged these as wrong",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onBackground,
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Tap resync above to find replacements, then approve to swap.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+
+                        itemsIndexed(
+                            items = state.flaggedTracks,
+                            key = { _, row -> "flagged_${row.trackId}" },
+                        ) { index, row ->
+                            val candidate = state.resyncCandidates[row.trackId]
+                            val isPreviewPlaying = previewState is PreviewState.Playing &&
+                                (previewState as PreviewState.Playing).videoId == candidate?.videoId
+                            val isPreviewLoading = state.previewLoading == candidate?.videoId
+
+                            FlaggedTrackListItem(
+                                row = row,
+                                candidate = candidate,
+                                isSwapping = row.trackId in state.swappingTrackIds,
+                                resyncAttempted = state.resyncProgress.isNotEmpty(),
+                                isPreviewPlaying = isPreviewPlaying,
+                                isPreviewLoading = isPreviewLoading,
+                                onPreview = { videoId -> viewModel.previewRejectedMatch(videoId) },
+                                onStopPreview = { viewModel.stopPreview() },
+                                onApprove = {
+                                    candidate?.let { viewModel.approveSwap(row, it) }
+                                },
+                                onUnflag = { viewModel.unflagTrack(row.trackId) },
+                            )
+
+                            if (index < state.flaggedTracks.lastIndex) {
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(start = 80.dp, end = 20.dp),
+                                    thickness = 0.5.dp,
+                                    color = extendedColors.glassBorder,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter),
+        ) { data -> Snackbar(snackbarData = data) }
+    }
+
+    // -- Dismiss confirmation dialog --
+    if (trackToDismiss != null) {
+        val track = trackToDismiss!!
+        AlertDialog(
+            onDismissRequest = { trackToDismiss = null },
+            title = {
+                Text(
+                    text = "Stop retrying this song?",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            },
+            text = {
+                Text(
+                    text = "'${track.artist} \u2014 ${track.title}' won't be downloaded during future syncs. You can find it manually using Search.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.dismissTrack(track.trackId)
+                        trackToDismiss = null
+                    },
+                ) {
+                    Text("Confirm")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { trackToDismiss = null }) {
+                    Text("Cancel")
+                }
+            },
+            containerColor = extendedColors.elevatedSurface,
+        )
+    }
+}
+
+// -- Header composable -------------------------------------------------------
+
+/**
+ * Displays the back button, screen title, subtitle, track count, and a
+ * resync button that triggers a fresh YouTube search for all unmatched tracks.
+ */
+@Composable
+private fun FailedMatchesHeader(
+    trackCount: Int,
+    flaggedCount: Int,
+    isResyncing: Boolean,
+    resyncProgress: String,
+    resyncCandidateCount: Int,
+    onBack: () -> Unit,
+    onResync: () -> Unit,
+    onApproveAll: () -> Unit,
+    onDismissAll: () -> Unit,
+) {
+    val extendedColors = StashTheme.extendedColors
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // Back button -- statusBarsPadding ensures it sits below the system bar
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(start = 8.dp, top = 8.dp),
+        ) {
+            IconButton(
+                onClick = onBack,
+                modifier = Modifier
+                    .size(48.dp)
+                    .background(
+                        color = extendedColors.glassBackground,
+                        shape = CircleShape,
+                    ),
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Title, subtitle, track count, and resync button
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp),
+        ) {
+            // Dynamic title + subtitle so the screen reads accurately
+            // whether the user arrived here because sync couldn't match
+            // songs, because they flagged a track from Now Playing, or
+            // both at once. Previously the header always said "Unmatched
+            // Songs" which was wrong when the only reason to be here was
+            // a flagged track.
+            val totalReview = trackCount + flaggedCount
+            val title = when {
+                trackCount > 0 && flaggedCount > 0 -> "Songs to Review"
+                flaggedCount > 0 -> "Flagged Songs"
+                else -> "Unmatched Songs"
+            }
+            val subtitle = when {
+                trackCount > 0 && flaggedCount > 0 ->
+                    "These songs couldn't be matched during sync, or you flagged them as wrong."
+                flaggedCount > 0 ->
+                    "Songs you flagged from Now Playing. Pick a replacement below."
+                else ->
+                    "These songs couldn't be found on YouTube during sync."
+            }
+            val countLine = when {
+                trackCount > 0 && flaggedCount > 0 ->
+                    "$trackCount unmatched \u00B7 $flaggedCount flagged \u00B7 $totalReview total"
+                flaggedCount > 0 ->
+                    "$flaggedCount flagged track${if (flaggedCount != 1) "s" else ""}"
+                else ->
+                    "$trackCount track${if (trackCount != 1) "s" else ""}"
+            }
+
+            Text(
+                text = title,
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground,
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = countLine,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            // Resync button -- triggers a fresh YouTube search for all tracks
+            Button(
+                onClick = onResync,
+                enabled = !isResyncing,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 12.dp),
+                shape = RoundedCornerShape(12.dp),
+            ) {
+                if (isResyncing) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Searching $resyncProgress...")
+                } else {
+                    Icon(Icons.Default.Refresh, null, Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Resync")
+                }
+            }
+
+            // Approve All button — visible when resync found candidates
+            if (resyncCandidateCount > 0 && !isResyncing) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = onApproveAll,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                ) {
+                    Icon(Icons.Default.Check, null, Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Approve All ($resyncCandidateCount)")
+                }
+            }
+
+            // Dismiss All button — permanently stop retrying all tracks
+            if (!isResyncing) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = onDismissAll,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.dp,
+                        MaterialTheme.colorScheme.error.copy(alpha = 0.5f),
+                    ),
+                ) {
+                    Icon(Icons.Default.Close, null, Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Dismiss All")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+        }
+    }
+}
+
+// -- Unmatched track row composable ------------------------------------------
+
+/**
+ * A single row for an unmatched track. Shows album art (or gradient
+ * placeholder), original track info, optional resync candidate info,
+ * preview/approve/dismiss buttons.
+ *
+ * @param track            The unmatched track data to display.
+ * @param candidate        The resync candidate for this track, if one was found.
+ * @param resyncAttempted  Whether a resync has been run (to show "No match found").
+ * @param isPreviewPlaying Whether this track's candidate is currently playing.
+ * @param isPreviewLoading Whether the preview URL is currently being extracted.
+ * @param onPreview        Callback invoked with the videoId to start preview.
+ * @param onStopPreview    Callback invoked to stop the current preview.
+ * @param onApprove        Callback invoked when the approve (checkmark) button is tapped.
+ * @param onDismiss        Callback invoked when the dismiss (X) button is tapped.
+ */
+@Composable
+private fun UnmatchedTrackRow(
+    track: UnmatchedTrackView,
+    candidate: ResyncCandidate?,
+    resyncAttempted: Boolean,
+    isPreviewPlaying: Boolean,
+    isPreviewLoading: Boolean,
+    onPreview: (String) -> Unit,
+    onStopPreview: () -> Unit,
+    onApprove: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // Album art: show candidate thumbnail if available, otherwise gradient placeholder
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(
+                    Brush.linearGradient(
+                        colors = listOf(
+                            MaterialTheme.colorScheme.primaryContainer,
+                            MaterialTheme.colorScheme.tertiary.copy(alpha = 0.6f),
+                        ),
+                    ),
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (candidate?.thumbnailUrl != null) {
+                AsyncImage(
+                    model = candidate.thumbnailUrl,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Default.MusicNote,
+                    contentDescription = null,
+                    modifier = Modifier.size(24.dp),
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.5f),
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.width(12.dp))
+
+        // Text column: original track info + candidate info
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            // Line 1: original track title and artist
+            Text(
+                text = "${track.title} \u2014 ${track.artist}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+
+            // Line 2: candidate info or "No match found"
+            if (candidate != null) {
+                Text(
+                    text = "${candidate.title} \u2014 ${candidate.artist}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            } else if (resyncAttempted) {
+                Text(
+                    text = "No match found",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    maxLines = 1,
+                )
+            }
+        }
+
+        // Preview button -- only shown when a candidate exists
+        if (candidate != null) {
+            IconButton(
+                onClick = if (isPreviewPlaying) onStopPreview else {
+                    { onPreview(candidate.videoId) }
+                },
+                modifier = Modifier.size(40.dp),
+            ) {
+                when {
+                    isPreviewLoading -> CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                    )
+                    isPreviewPlaying -> Icon(
+                        imageVector = Icons.Default.Stop,
+                        contentDescription = "Stop preview",
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                    else -> Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Preview match",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        // Approve button -- only shown when a candidate exists
+        if (candidate != null) {
+            IconButton(
+                onClick = onApprove,
+                modifier = Modifier.size(40.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = "Approve match",
+                    tint = Color(0xFF4CAF50),
+                )
+            }
+        }
+
+        // Dismiss button -- always shown
+        IconButton(
+            onClick = onDismiss,
+            modifier = Modifier.size(40.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = "Dismiss",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * Row composable for a user-flagged track (see [FlaggedTrackRow]). Mirrors
+ * [UnmatchedTrackRow] but with a distinct approve/unflag surface — the track
+ * already has an audio file on disk, so "approve" triggers a swap rather than
+ * a fresh download, and "unflag" clears the wrong-match flag without entering
+ * the permanent-dismiss lane. While an approved swap runs ([isSwapping]) the
+ * row stays put and says so; it leaves the list once the swap is done.
+ */
+@Composable
+private fun FlaggedTrackListItem(
+    row: FlaggedTrackRow,
+    candidate: ResyncCandidate?,
+    isSwapping: Boolean,
+    resyncAttempted: Boolean,
+    isPreviewPlaying: Boolean,
+    isPreviewLoading: Boolean,
+    onPreview: (String) -> Unit,
+    onStopPreview: () -> Unit,
+    onApprove: () -> Unit,
+    onUnflag: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(
+                    Brush.linearGradient(
+                        colors = listOf(
+                            MaterialTheme.colorScheme.primaryContainer,
+                            MaterialTheme.colorScheme.tertiary.copy(alpha = 0.6f),
+                        ),
+                    ),
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            val art = candidate?.thumbnailUrl ?: row.albumArtUrl
+            if (art != null) {
+                AsyncImage(
+                    model = art,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Default.MusicNote,
+                    contentDescription = null,
+                    modifier = Modifier.size(24.dp),
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.5f),
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.width(12.dp))
+
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Text(
+                text = "${row.title} \u2014 ${row.artist}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (isSwapping) {
+                Text(
+                    text = "Swapping\u2026",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                )
+            } else if (candidate != null) {
+                Text(
+                    text = "\u2192 ${candidate.title} \u2014 ${candidate.artist}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            } else if (resyncAttempted) {
+                Text(
+                    text = "No replacement found",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    maxLines = 1,
+                )
+            } else {
+                Text(
+                    text = "Tap Resync to find replacements",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    maxLines = 1,
+                )
+            }
+        }
+
+        if (isSwapping) {
+            Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp,
+                )
+            }
+        } else if (candidate != null) {
+            IconButton(
+                onClick = if (isPreviewPlaying) onStopPreview else {
+                    { onPreview(candidate.videoId) }
+                },
+                modifier = Modifier.size(40.dp),
+            ) {
+                when {
+                    isPreviewLoading -> CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                    )
+                    isPreviewPlaying -> Icon(
+                        imageVector = Icons.Default.Stop,
+                        contentDescription = "Stop preview",
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                    else -> Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Preview replacement",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        if (candidate != null && !isSwapping) {
+            IconButton(
+                onClick = onApprove,
+                modifier = Modifier.size(40.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = "Swap to this match",
+                    tint = Color(0xFF4CAF50),
+                )
+            }
+        }
+
+        // No unflag while it swaps: the swap clears the flag when it is done.
+        if (!isSwapping) {
+            IconButton(
+                onClick = onUnflag,
+                modifier = Modifier.size(40.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Unflag (keep current match)",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}

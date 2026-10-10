@@ -1,0 +1,91 @@
+package com.stash.app.navigation
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.LibraryMusic
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.LibraryMusic
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.ui.graphics.vector.ImageVector
+import kotlinx.serialization.Serializable
+
+enum class TopLevelDestination(val selectedIcon: ImageVector, val unselectedIcon: ImageVector, val label: String, val route: Any) {
+    HOME(Icons.Filled.Home, Icons.Outlined.Home, "Home", HomeRoute),
+    LIBRARY(Icons.Filled.LibraryMusic, Icons.Outlined.LibraryMusic, "Library", LibraryRoute),
+    SEARCH(Icons.Filled.Search, Icons.Outlined.Search, "Search", SearchRoute),
+    SYNC(Icons.Filled.Sync, Icons.Outlined.Sync, "Sync", SyncRoute),
+}
+
+@Serializable data object HomeRoute
+@Serializable data object LibraryRoute
+@Serializable data object SearchRoute
+@Serializable data object SyncRoute
+@Serializable data object SettingsRoute
+@Serializable data object NowPlayingRoute
+@Serializable data class PlaylistDetailRoute(val playlistId: Long, val openShare: Boolean = false)
+@Serializable data class ArtistDetailRoute(val artistName: String)
+@Serializable data class AlbumDetailRoute(val albumName: String, val artistName: String)
+@Serializable data class LikedSongsDetailRoute(val source: String? = null)
+@Serializable data object FailedMatchesRoute
+@Serializable data object FailedDownloadsRoute
+@Serializable data object DownloadManagementRoute
+@Serializable data object BlockedSongsRoute
+@Serializable data object EqualizerRoute
+@Serializable data object LibraryHealthRoute
+@Serializable data object SquidWtfCaptchaRoute
+@Serializable data object DiagnosticsPreviewRoute
+@Serializable data object SettingsPlaybackRoute
+@Serializable data object SettingsAudioQualityRoute
+@Serializable data object SettingsAccountsRoute
+@Serializable data object SettingsLibraryStorageRoute
+@Serializable data object SettingsAppearanceRoute
+@Serializable data object SettingsAboutRoute
+@Serializable data class MixBuilderRoute(val recipeId: Long? = null)
+@Serializable data class SharedMixRoute(val shareId: String)
+@Serializable data class SharedTrackRoute(val link: String)
+@Serializable data class ListenJoinRoute(val code: String)
+// Community's routes. StashNavHost pops them while Community is off: a new one must join that check.
+/** Community's See all (spec 2026-09-26 §3); [mine] opens it on Mine (after a live_limit). */
+@Serializable data class CommunityRoute(val mine: Boolean = false)
+@Serializable data class CommunityPostRoute(val postId: String)
+
+@Serializable
+data class SearchArtistRoute(
+    val artistId: String,
+    val name: String,
+    val avatarUrl: String? = null,
+    val focusAlbum: String? = null,
+)
+
+@Serializable
+data class SearchAlbumRoute(
+    val browseId: String,
+    val title: String,
+    val artist: String,
+    val thumbnailUrl: String?,
+    val year: String?,
+    // Which catalog this album came from — routes AlbumCache + the play path.
+    // Defaulted so any pre-update back-stack entry still deserializes.
+    val source: com.stash.data.ytmusic.model.AlbumSource =
+        com.stash.data.ytmusic.model.AlbumSource.YOUTUBE,
+    // #481: the Qobuz release's track count when the card knew it (Home's Qobuz
+    // rows, the artist page's Qobuz albums). Qobuz sends no release type, so this
+    // tells a single from an album. Defaulted like [source].
+    val qobuzTrackCount: Int? = null,
+)
+
+/** "See all" Qobuz-playlist browse, filtered by the [genre] chip label ("All" = none). */
+@Serializable
+data class PlaylistBrowseRoute(val genre: String = "All")
+
+/** "See all" browse of one Home mix rail; [rail] is a [MixRail] name. */
+@Serializable
+data class MixBrowseRoute(val rail: String)
+
+/** Full-screen per-source playlist management; [source] is a [SyncSource] name. */
+@Serializable
+data class ManagePlaylistsRoute(val source: String)

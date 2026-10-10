@@ -1,0 +1,101 @@
+# Built application files
+*.apk
+*.aar
+*.ap_
+*.aab
+
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+build/
+
+# Gradle files
+.gradle/
+gradle-app.setting
+!gradle-wrapper.jar
+!gradle-wrapper.properties
+
+# Local configuration file
+local.properties
+*.bak
+
+# Android Studio
+*.iml
+.idea/
+.DS_Store
+
+# NDK
+obj/
+.externalNativeBuild/
+.cxx/
+
+# IntelliJ
+*.iws
+*.ipr
+
+# Keystore files
+*.jks
+*.keystore
+!debug.keystore
+keystore.properties
+keystore-password-SAVE-THEN-DELETE.txt
+keystore-base64-SAVE-THEN-DELETE.txt
+
+# Google Services
+google-services.json
+
+# Secrets and credentials
+*.env
+credentials.json
+
+# OS generated files
+Thumbs.db
+.DS_Store
+ehthumbs.db
+Desktop.ini
+
+# Captures (Android Studio)
+captures/
+
+# Log files
+*.log
+node_modules/
+
+# Cloudflare Workers local state and local secrets (infra/*)
+.wrangler/
+.dev.vars
+*.pem
+.worktrees/
+
+# Superpowers visual-companion server artifacts (per-session local state)
+.superpowers/
+
+# Claude Code per-machine local state (the shared .claude/ config stays tracked)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Local spike/experiment artifacts — never commit (huge binaries, screenshots).
+# The bare globs only matched spike/'s top level, leaving spike/clap/*.onnx and
+# the WAV fixtures stageable — hundreds of MB one `git add spike/` away.
+spike/*.png
+spike/*.flac
+spike/*.txt
+spike/*.xml
+spike/**/*.onnx
+spike/**/*.wav
+spike/**/__pycache__/
+
+# CLAP sonic-recommendation spike fixtures — 515MB of ONNX models + WAVs that
+# live under androidTest so the on-device spike can read them. Never commit.
+app/src/androidTest/assets/clapspike/
+.kotlin/
+
+# LUMA: local release copy of the APK
+LUMA.apk

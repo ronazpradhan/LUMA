@@ -1,0 +1,1352 @@
+package com.stash.core.data.sync.workers
+
+import android.content.Context
+import android.content.pm.ServiceInfo
+import android.util.Log
+import androidx.hilt.work.HiltWorker
+import androidx.work.CoroutineWorker
+import androidx.work.ForegroundInfo
+import androidx.work.WorkManager
+import androidx.work.WorkerParameters
+import androidx.work.workDataOf
+import com.stash.core.auth.TokenManager
+import com.stash.core.auth.model.AuthService
+import com.stash.core.data.db.dao.PlaylistDao
+import com.stash.core.data.db.dao.RemoteSnapshotDao
+import com.stash.core.data.db.dao.SyncHistoryDao
+import com.stash.core.data.db.entity.RemotePlaylistSnapshotEntity
+import com.stash.core.data.db.entity.RemoteTrackSnapshotEntity
+import com.stash.core.data.db.entity.SyncHistoryEntity
+import com.stash.core.data.sync.AuthExpiryState
+import com.stash.core.data.sync.SyncNotificationManager
+import com.stash.core.data.sync.SyncPreferencesManager
+import com.stash.core.data.sync.SyncStateManager
+import com.stash.core.data.sync.auth.SpotifyAuthHealthProbe
+import com.stash.core.data.sync.auth.YoutubeAuthHealthProbe
+import com.stash.core.model.MusicSource
+import com.stash.core.model.PlaylistType
+import com.stash.core.model.StepStatus
+import com.stash.core.model.SyncMode
+import com.stash.core.model.SyncResult
+import com.stash.core.model.SyncState
+import com.stash.core.model.SyncStepResult
+import com.stash.core.model.SyncTrigger
+import com.stash.data.spotify.SpotifyApiClient
+import com.stash.data.spotify.SpotifyApiException
+import com.stash.data.spotify.SpotifyLibraryPage
+import com.stash.data.spotify.sortLikedSongsByAddedAtDesc
+import com.stash.data.ytmusic.InnerTubeClient
+import com.stash.data.ytmusic.YTMusicApiClient
+import com.stash.data.ytmusic.model.MusicVideoType
+import com.stash.data.ytmusic.model.YTMusicPlaylist
+import com.stash.data.ytmusic.model.YTMusicTrack
+import dagger.assisted.Assisted
+import dagger.assisted.AssistedInject
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import java.time.Instant
+
+internal fun likedPlaylistArtUrl(trackArtUrls: Sequence<String?>): String? =
+    com.stash.core.common.ArtUrlUpgrader.upgrade(
+        trackArtUrls.firstOrNull { !it.isNullOrBlank() }
+    )
+
+/**
+ * Whether a sync may soft-hide playlists that the remote didn't return this run.
+ *
+ * BOTH conditions are required, and each guards a real data-loss bug:
+ *  - `REFRESH` — ACCUMULATE's whole promise is "never remove anything". Hiding a
+ *    playlist the user still has is a removal from their point of view.
+ *  - `inventoryComplete` — a partial fetch (one failed leg) must never be read as
+ *    "the rest are gone" (#343/#348).
+ *
+ * Applies to EVERY source. It was originally Spotify-only, and YouTube open-coded
+ * just the inventory half — so an ACCUMULATE sync still hid YouTube playlists,
+ * including user-created ones. Keep both sources on this one predicate.
+ */
+internal fun shouldDeactivateMissingPlaylists(
+    syncMode: SyncMode,
+    inventoryComplete: Boolean,
+): Boolean = syncMode == SyncMode.REFRESH && inventoryComplete
+
+private val DAILY_MIX_NAME = Regex("""Daily Mix \d+""")
+
+/**
+ * Whether a `libraryV3` row should be snapshotted as a user playlist.
+ *
+ * libraryV3 lists what the user actually SAVED, so ownership says nothing
+ * about whether they want it synced: a followed "Made For You" playlist —
+ * a friend's Discover Weekly or Release Radar — is owned by "spotify" but
+ * never appears in the user's OWN home feed, so the old
+ * `owner != "spotify"` filter dropped it here and no other pass picked it
+ * up (issue #354).
+ *
+ * Skip only what the home-feed mix pass already snapshotted this run
+ * ([homeFeedMixIds]), plus "Daily Mix N" by name so the home feed stays
+ * the single source of those even when the sp_dc call behind it fails.
+ */
+/**
+ * Whether a sync run produced nothing usable and should be marked FAILED:
+ * every step that actually RAN errored.
+ *
+ * [StepStatus.SKIPPED] steps are excluded from the vote. A step the user turned
+ * off (auto-mix discovery) is not evidence the sync worked — counting it would
+ * make "everything failed" unreachable, so a totally broken sync would report
+ * success purely because one step was disabled. A run of nothing but SKIPPED
+ * steps isn't a failure either: nothing was attempted.
+ */
+internal fun allAttemptedStepsFailed(diagnostics: List<SyncStepResult>): Boolean {
+    val attempted = diagnostics.filter { it.status != StepStatus.SKIPPED }
+    return attempted.isNotEmpty() && attempted.all { it.status == StepStatus.ERROR }
+}
+
+internal fun keepAsLibraryPlaylist(
+    id: String,
+    name: String,
+    homeFeedMixIds: Set<String>,
+): Boolean = id !in homeFeedMixIds && !DAILY_MIX_NAME.matches(name)
+
+/**
+ * The Spotify playlist ids this run can honestly say still exist — the set
+ * [com.stash.core.data.db.dao.PlaylistDao.deactivateMissingSpotifyCustomPlaylists]
+ * measures "missing" against.
+ *
+ * Every id the library walk LISTED, pre-filter. libraryV3 is the account's
+ * inventory, so it is the only authority on whether a saved playlist is still
+ * saved — deliberately NOT widened with `homeFeedMixIds`, or unsaving a
+ * playlist Spotify still features would leave its row active forever.
+ *
+ * Equally NOT the post-[keepAsLibraryPlaylist] list. That filter is
+ * classification routing — "the mix pass owns this id, don't snapshot it
+ * twice" — and says nothing about whether the playlist left the account.
+ * Feeding the filtered list in hid a playlist the moment it started matching
+ * the filter: appear on the home feed, or get renamed to "Daily Mix N", and
+ * the CUSTOM row the walk had just listed flipped to `is_active = 0`. The
+ * name-match case has no DAILY_MIX snapshot behind it to reactivate the row,
+ * so the playlist disappeared for good (#437).
+ *
+ * ponytail: a name-filtered id counted live here gets no snapshot this run, so
+ * its row keeps whatever tracks it already had. Deliberate — stale beats gone,
+ * and the only ids that reach it are "Daily Mix N"-named rotating mixes whose
+ * contents were never authoritative. The real repair is to snapshot such an
+ * item when the home-feed pass didn't claim it; that belongs with the name
+ * filter, which exists to keep the home feed the single source of Daily Mixes
+ * even when sp_dc fails, and which also keeps [reconciledPlaylistType] from
+ * re-filing a genuine Daily Mix as a playlist on a failed-sp_dc run.
+ */
+internal fun spotifyLivenessIds(observedLibraryIds: List<String>): List<String> =
+    observedLibraryIds.distinct()
+
+/**
+ * First worker in the sync chain. Authenticates with configured music services,
+ * fetches playlist and track metadata, and writes everything to the remote
+ * snapshot tables for the subsequent [DiffWorker] to consume.
+ *
+ * Outputs [KEY_SYNC_ID] so downstream workers can reference the sync run.
+ */
+@HiltWorker
+class PlaylistFetchWorker @AssistedInject constructor(
+    @Assisted appContext: Context,
+    @Assisted params: WorkerParameters,
+    private val tokenManager: TokenManager,
+    private val spotifyApiClient: SpotifyApiClient,
+    private val ytMusicApiClient: YTMusicApiClient,
+    private val innerTubeClient: InnerTubeClient,
+    private val playlistDao: PlaylistDao,
+    private val syncHistoryDao: SyncHistoryDao,
+    private val remoteSnapshotDao: RemoteSnapshotDao,
+    private val syncStateManager: SyncStateManager,
+    private val syncLog: com.stash.core.data.sync.SyncLog,
+    private val syncNotificationManager: SyncNotificationManager,
+    private val syncPreferencesManager: SyncPreferencesManager,
+    private val spotifyAuthHealthProbe: SpotifyAuthHealthProbe,
+    private val youtubeAuthHealthProbe: YoutubeAuthHealthProbe,
+    private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
+) : CoroutineWorker(appContext, params) {
+
+    companion object {
+        const val KEY_SYNC_ID = "sync_id"
+        const val KEY_YOUTUBE_INVENTORY_COMPLETE = "youtube_inventory_complete"
+
+        /** Input: the [SyncTrigger] name of what started this sync; absent = MANUAL. */
+        const val KEY_TRIGGER = "sync_trigger"
+        private const val TAG = "StashSync"
+        /** Cap on concurrent in-flight YT browse calls during a sync. */
+        private const val MAX_PARALLEL_YT_FETCHES = 3
+
+        // Home Mixes (Daily Mix etc.) are infinite radio — every page returns
+        // another continuation token. Cap to the initial page (~100 tracks)
+        // so a sync doesn't spend minutes walking radio. User playlists +
+        // Liked Songs use the full MAX_PAGES default in YTMusicApiClient.
+        private const val HOME_MIX_MAX_PAGES = 1
+
+        // Shared reason string for auth-expiry short-circuit so the
+        // sync_history FAILED row and the SyncStateManager onError call
+        // can't drift out of sync.
+        private const val AUTH_EXPIRED_REASON = "Credentials expired — re-authenticate to resume sync"
+    }
+
+    /**
+     * Running count of playlists/mixes whose tracks have been fetched
+     * (Spotify daily mixes + liked songs + user playlists, YouTube home
+     * mixes + liked songs + user playlists) — fed to
+     * [SyncStateManager.onFetchingPlaylists] so a long fetch on a big
+     * library shows a live "Fetched N playlists…" counter instead of the
+     * bar sitting frozen. Thread-safe: several of these fetches run
+     * concurrently via [fetchYouTubePlaylists]'s Semaphore-bounded async.
+     */
+    private val fetchedPlaylistCounter = AtomicInteger(0)
+
+    private fun reportPlaylistFetched() {
+        syncStateManager.onFetchingPlaylists(fetchedPlaylistCounter.incrementAndGet())
+    }
+
+    /**
+    * Flips to false the moment ANY YouTube fetch leg this run (home mixes
+    * listing, liked songs, user-playlist listing, or any individual mix/
+    * playlist's track fetch) errors or throws. Read by [doWork] and passed
+    * to DiffWorker via workDataOf so it can skip
+    * [PlaylistDao.deactivateMissingForSource] on a partial inventory —
+    * otherwise one flaky sub-fetch makes every OTHER YouTube playlist look
+    * "missing" and DiffWorker hides them (#post-343 YouTube analogue).
+    */
+    private val youtubeInventoryComplete = java.util.concurrent.atomic.AtomicBoolean(true)
+
+    private fun markYoutubeIncomplete(reason: String) {
+        if (youtubeInventoryComplete.compareAndSet(true, false)) {
+            Log.w(TAG, "YouTube inventory marked incomplete: $reason")
+        }
+    }
+
+    /**
+     * Called by WorkManager BEFORE [doWork] runs. Promotes the worker to a
+     * foreground service with a "Fetching playlists…" notification so the
+     * system doesn't kill it during long fetches on huge libraries (3000+
+     * liked songs can take more than 10 minutes of paginated API calls).
+     *
+     * See [TrackDownloadWorker.getForegroundInfo] for background on why
+     * this override is necessary rather than calling setForeground() inside
+     * doWork().
+     */
+    override suspend fun getForegroundInfo(): ForegroundInfo {
+        val cancelIntent = WorkManager.getInstance(applicationContext)
+            .createCancelPendingIntent(id)
+        val notification = syncNotificationManager.buildProgressNotification(
+            title = "Syncing playlists",
+            text = "Fetching your library…",
+            progress = -1f, // indeterminate spinner — we don't know total until mid-fetch
+            cancelIntent = cancelIntent,
+        )
+        return ForegroundInfo(
+            SyncNotificationManager.NOTIFICATION_ID_PROGRESS,
+            notification,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+        )
+    }
+
+    override suspend fun doWork(): Result {
+        // Step 1: Create a sync history record. Only one sync runs at a time, so a
+        // row still open now belongs to a chain that was replaced while paused
+        // between steps: close it as interrupted, not "Running" until the next launch.
+        syncHistoryDao.resetStaleSyncs()
+        val syncEntry = SyncHistoryEntity(
+            status = SyncState.AUTHENTICATING,
+            // SyncScheduler says what started the sync; a chain queued before it did counts as MANUAL.
+            trigger = inputData.getString(KEY_TRIGGER)?.let { SyncTrigger.valueOf(it) } ?: SyncTrigger.MANUAL,
+            streamingMode = streamingPreference.current(),
+            startedAt = Instant.now(),
+        )
+        val syncId = syncHistoryDao.insert(syncEntry)
+        val diagnostics = java.util.Collections.synchronizedList(mutableListOf<SyncStepResult>())
+        // Starts a fresh terminal for this run. Previous lines are cleared here
+        // rather than at the end, so the last run stays readable until a new one
+        // begins — reading it AFTER the fact is the point.
+        syncLog.beginRun("Looking for new music…")
+
+        try {
+            // Step 2: Authenticating phase.
+            syncStateManager.onAuthenticating()
+
+            val isSpotifyAuthenticated = tokenManager.isAuthenticated(AuthService.SPOTIFY)
+            val isYouTubeAuthenticated = tokenManager.isAuthenticated(AuthService.YOUTUBE_MUSIC)
+
+            if (!isSpotifyAuthenticated && !isYouTubeAuthenticated) {
+                syncHistoryDao.updateStatus(
+                    id = syncId,
+                    status = SyncState.FAILED,
+                    completedAt = System.currentTimeMillis(),
+                    errorMessage = "No authenticated services",
+                )
+                syncStateManager.onError("No authenticated services")
+                return Result.failure(workDataOf(KEY_SYNC_ID to syncId))
+            }
+
+            // Step 2b: Probe live auth health for each connected source. We
+            // abort the chain ONLY when no connected source is usable (every
+            // one expired) — downstream workers (DiffWorker, TrackDownloadWorker,
+            // SyncFinalizeWorker) won't run because Result.failure() short-circuits
+            // the WorkContinuation. When only some sources are expired the chain
+            // proceeds and we fetch just the healthy ones (Step 4/5). The same
+            // isAuthenticated() booleans gate both the probe and the fetch so the
+            // "usable source" predicate can't drift. The AuthExpiredBanner reads
+            // syncStateManager.authExpiry to render the per-source "Re-authenticate" CTA.
+            val probeResult = runAuthProbes(
+                spotifyConnected = isSpotifyAuthenticated,
+                youtubeConnected = isYouTubeAuthenticated,
+                spotifyProbe = spotifyAuthHealthProbe,
+                youtubeProbe = youtubeAuthHealthProbe,
+            )
+            syncStateManager.onAuthExpiryProbed(probeResult.state)
+            if (probeResult.shortCircuit) {
+                Log.i(
+                    TAG,
+                    "Auth expired (spotify=${probeResult.state.spotifyExpired}, " +
+                        "youtube=${probeResult.state.youtubeExpired}); aborting chain",
+                )
+                syncHistoryDao.updateStatus(
+                    id = syncId,
+                    status = SyncState.FAILED,
+                    completedAt = System.currentTimeMillis(),
+                    errorMessage = AUTH_EXPIRED_REASON,
+                )
+                syncStateManager.onError(AUTH_EXPIRED_REASON)
+                return Result.failure(workDataOf(KEY_SYNC_ID to syncId))
+            }
+
+            // Step 3: Transition to fetching playlists.
+            syncStateManager.onFetchingPlaylists()
+            syncHistoryDao.updateStatus(syncId, SyncState.FETCHING_PLAYLISTS)
+
+            // Step 4 & 5: Fetch each source the probe deemed usable. The
+            // fetch flags fold in both "connected" and "not expired", and are
+            // the SAME values that drove the short-circuit decision above — so
+            // a source skipped here is exactly a source that didn't count
+            // toward keeping the sync alive.
+            if (probeResult.fetchSpotify) {
+                fetchSpotifyPlaylists(syncId, diagnostics)
+            }
+            var youtubeComplete = true
+            if (probeResult.fetchYoutube) {
+                youtubeComplete = fetchYouTubePlaylists(syncId, diagnostics)
+            }
+
+            // Persist diagnostics.
+            syncHistoryDao.updateDiagnostics(syncId, Json.encodeToString(diagnostics.toList()))
+
+            // If every step that RAN errored, the sync produced no data -- fail.
+            if (allAttemptedStepsFailed(diagnostics)) {
+                val summary = diagnostics
+                    .filter { it.status != StepStatus.SKIPPED }
+                    .joinToString("; ") { "${it.service}/${it.step}: ${it.errorMessage}" }
+                syncHistoryDao.updateStatus(
+                    id = syncId,
+                    status = SyncState.FAILED,
+                    completedAt = System.currentTimeMillis(),
+                    errorMessage = "All API calls failed: $summary",
+                )
+                syncStateManager.onError("All API calls failed")
+                return Result.failure(workDataOf(KEY_SYNC_ID to syncId))
+            }
+
+            return Result.success(
+                workDataOf(
+                    KEY_SYNC_ID to syncId,
+                    KEY_YOUTUBE_INVENTORY_COMPLETE to youtubeComplete,
+                )
+            )
+        } catch (e: SpotifyApiException) {
+            // Transient Spotify API failure (e.g. 429 rate limit exhausted) --
+            // ask WorkManager to schedule a retry so the sync can succeed later.
+            Log.w(TAG, "Spotify API error (HTTP ${e.httpCode}), scheduling retry", e)
+            syncHistoryDao.updateDiagnostics(syncId, Json.encodeToString(diagnostics.toList()))
+            syncHistoryDao.updateStatus(
+                id = syncId,
+                status = SyncState.FAILED,
+                completedAt = System.currentTimeMillis(),
+                errorMessage = "Spotify rate limited (HTTP ${e.httpCode}), will retry",
+            )
+            syncStateManager.onError("Spotify API rate limited, retrying...", e)
+            return Result.retry()
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            Log.e(TAG, "Playlist fetch failed", e)
+            syncHistoryDao.updateDiagnostics(syncId, Json.encodeToString(diagnostics.toList()))
+            syncHistoryDao.updateStatus(
+                id = syncId,
+                status = SyncState.FAILED,
+                completedAt = System.currentTimeMillis(),
+                errorMessage = e.message,
+            )
+            syncStateManager.onError("Fetch failed: ${e.message}", e)
+            return Result.failure(workDataOf(KEY_SYNC_ID to syncId))
+        }
+    }
+
+    /**
+     * Fetches Daily Mixes and Liked Songs from Spotify and writes snapshot rows.
+     *
+     * Uses the two-pronged approach:
+     * - Daily Mixes enumeration uses sp_dc/GraphQL (may fail gracefully)
+     * - Track fetching uses client_credentials/Web API (reliable)
+     * - Liked Songs uses sp_dc/GraphQL (may fail gracefully)
+     *
+     * Partial failures are logged but do NOT cause the entire sync to fail.
+     * For example, if Daily Mixes can't be enumerated (sp_dc issue) but
+     * Liked Songs work, the sync still succeeds with whatever data was fetched.
+     *
+     * @throws SpotifyApiException only if a critical, retryable API error occurs
+     *         during track fetching (e.g., client_credentials token endpoint down).
+     */
+    private suspend fun fetchSpotifyPlaylists(syncId: Long, diagnostics: MutableList<SyncStepResult>) {
+        Log.d(TAG, "fetchSpotifyPlaylists: starting for syncId=$syncId")
+        var dailyMixCount = 0
+        var likedSongCount = 0
+        // Ids covered by the home-feed mix pass below; the library walk
+        // excludes exactly these instead of everything spotify owns (#354).
+        val homeFeedMixIds = mutableSetOf<String>()
+
+        // Auto-mix discovery is opt-OUT (#335, #344). These are playlists the
+        // user never created or saved, so when someone turns them off we must
+        // not fetch them at all — skipping the call is also what makes their
+        // sync shorter, which was half the complaint. Anything already in the
+        // library stays put; the per-mix Home toggle in Manage Playlists still
+        // applies to those. Defaults to true — see SyncPreferencesManager.
+        val discoverMixes = runCatching {
+            syncPreferencesManager.discoverAutoMixes.first()
+        }.getOrDefault(true)
+
+        // Fetch Daily Mixes (sp_dc dependent -- may return empty if GraphQL fails).
+        if (!discoverMixes) {
+            Log.d(TAG, "fetchSpotifyPlaylists: auto-mix discovery disabled, skipping home feed")
+            diagnostics.add(SyncStepResult("SPOTIFY", "getDailyMixes", StepStatus.SKIPPED, 0))
+        } else try {
+            when (val result = spotifyApiClient.getDailyMixes()) {
+                is SyncResult.Success -> {
+                    // Fold in the yearly recaps ("Your Top Songs 2024", "Your
+                    // All-Time Top Songs"). They only appear on the home feed for
+                    // a few weeks each December, so without this a sync in any
+                    // other month can never find them — the long-standing "why
+                    // don't we pull yearly mixes" gap.
+                    //
+                    // Additive and best-effort: anything but Success is ignored,
+                    // so a change on Spotify's side costs these extra playlists,
+                    // never the mixes the home feed already found.
+                    val yearly = when (val y = spotifyApiClient.getYearlyMixes()) {
+                        is SyncResult.Success -> y.data
+                        else -> emptyList()
+                    }
+                    val seenIds = result.data.mapTo(mutableSetOf()) { it.id }
+                    val extraYearly = yearly.filter { seenIds.add(it.id) }
+                    if (extraYearly.isNotEmpty()) {
+                        Log.d(TAG, "fetchSpotifyPlaylists: +${extraYearly.size} yearly recap(s)")
+                        syncLog.success(
+                            "Your recaps — " + extraYearly.joinToString(", ") { it.name },
+                        )
+                    }
+                    val dailyMixes = result.data + extraYearly
+                    diagnostics.add(SyncStepResult("SPOTIFY", "getDailyMixes", StepStatus.SUCCESS, dailyMixes.size))
+                    Log.d(TAG, "fetchSpotifyPlaylists: found ${dailyMixes.size} daily mixes")
+
+                    for (mix in dailyMixes) {
+                        homeFeedMixIds += mix.id
+                        try {
+                            val mixNumber = Regex("""\d+""").find(mix.name)?.value?.toIntOrNull()
+                            val playlistSnapshotId = remoteSnapshotDao.insertPlaylistSnapshot(
+                                RemotePlaylistSnapshotEntity(
+                                    syncId = syncId,
+                                    source = MusicSource.SPOTIFY,
+                                    sourcePlaylistId = mix.id,
+                                    playlistName = mix.name,
+                                    playlistType = PlaylistType.DAILY_MIX,
+                                    mixNumber = mixNumber,
+                                    trackCount = mix.tracks?.total ?: 0,
+                                    artUrl = mix.images?.firstOrNull()?.url,
+                                )
+                            )
+
+                            // Track fetching uses client_credentials (Prong 1) -- reliable
+                            when (val tracksResult = spotifyApiClient.getPlaylistTracks(mix.id)) {
+                                is SyncResult.Success -> {
+                                    val tracks = tracksResult.data
+                                    val trackSnapshots = tracks.mapIndexedNotNull { index, item ->
+                                        val track = item.track ?: return@mapIndexedNotNull null
+                                        RemoteTrackSnapshotEntity(
+                                            syncId = syncId,
+                                            snapshotPlaylistId = playlistSnapshotId,
+                                            title = track.name,
+                                            artist = track.artists.joinToString(", ") { it.name },
+                                            album = track.album?.name,
+                                            durationMs = track.duration_ms,
+                                            spotifyUri = track.uri,
+                                            albumArtUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(track.album?.images?.firstOrNull()?.url),
+                                            position = index,
+                                            isrc = track.isrc,
+                                            explicit = track.explicit,
+                                        )
+                                    }
+                                    if (trackSnapshots.isNotEmpty()) {
+                                        remoteSnapshotDao.insertTrackSnapshots(trackSnapshots)
+                                        dailyMixCount++
+                                    }
+                                    Log.d(TAG, "fetchSpotifyPlaylists: saved ${trackSnapshots.size} tracks for '${mix.name}'")
+                                }
+                                is SyncResult.Empty -> {
+                                    Log.d(TAG, "fetchSpotifyPlaylists: no tracks for '${mix.name}': ${tracksResult.reason}")
+                                }
+                                is SyncResult.Error -> {
+                                    if (tracksResult.cause is SpotifyApiException) {
+                                        throw tracksResult.cause as SpotifyApiException
+                                    }
+                                    Log.e(TAG, "fetchSpotifyPlaylists: failed to fetch tracks for '${mix.name}': ${tracksResult.message}")
+                                }
+                            }
+                        } catch (e: SpotifyApiException) {
+                            // Re-throw SpotifyApiException so doWork() can decide to retry
+                            throw e
+                        } catch (e: Exception) {
+                            Log.e(TAG, "fetchSpotifyPlaylists: failed to fetch tracks for mix '${mix.name}'", e)
+                            // Continue with next mix rather than aborting
+                        }
+                        reportPlaylistFetched()
+                    }
+                }
+                is SyncResult.Empty -> {
+                    diagnostics.add(SyncStepResult("SPOTIFY", "getDailyMixes", StepStatus.EMPTY, errorMessage = result.reason))
+                    Log.d(TAG, "fetchSpotifyPlaylists: daily mixes empty: ${result.reason}")
+                }
+                is SyncResult.Error -> {
+                    diagnostics.add(SyncStepResult("SPOTIFY", "getDailyMixes", StepStatus.ERROR, errorMessage = result.message))
+                    Log.e(TAG, "fetchSpotifyPlaylists: daily mixes error: ${result.message}")
+                }
+            }
+        } catch (e: SpotifyApiException) {
+            throw e // Let doWork handle retries
+        } catch (e: Exception) {
+            Log.e(TAG, "fetchSpotifyPlaylists: daily mixes enumeration failed (sp_dc issue), continuing", e)
+            diagnostics.add(SyncStepResult("SPOTIFY", "getDailyMixes", StepStatus.ERROR, errorMessage = e.message))
+        }
+
+        // Fetch Liked Songs with pagination (sp_dc dependent).
+        // Spotify returns max 50 per page; we loop until we get all tracks.
+        try {
+            val allLikedSongs = mutableListOf<com.stash.data.spotify.model.SpotifyTrackItem>()
+            var likedOffset = 0
+            val likedPageSize = 50
+            // #343: an error mid-pagination used to break out and snapshot
+            // the truncated pile as if it were the complete library —
+            // REFRESH then mirrored Liked Songs DOWN to it. Track the
+            // failure so the snapshot admits incompleteness.
+            var likedFetchPartial = false
+
+            while (true) {
+                when (val result = spotifyApiClient.getLikedSongs(limit = likedPageSize, offset = likedOffset)) {
+                    is SyncResult.Success -> {
+                        allLikedSongs.addAll(result.data)
+                        Log.d(TAG, "fetchSpotifyPlaylists: liked songs page offset=$likedOffset, got ${result.data.size}")
+                        if (result.data.size < likedPageSize) break
+                        likedOffset += likedPageSize
+                    }
+                    is SyncResult.Empty -> break
+                    is SyncResult.Error -> {
+                        likedFetchPartial = true
+                        Log.e(TAG, "fetchSpotifyPlaylists: liked songs page error at offset=$likedOffset: ${result.message}")
+                        break
+                    }
+                }
+            }
+
+            // #410: position IS the Liked Songs order the user sees, and it was
+            // just the index the endpoint happened to hand back — fetchLibraryTracks
+            // is called without an `order` variable, so that index is not ours to
+            // trust. Order by the add date Spotify reports instead; pages that
+            // carry no add date come back untouched.
+            val orderedLikedSongs = sortLikedSongsByAddedAtDesc(allLikedSongs)
+
+            if (orderedLikedSongs.isNotEmpty()) {
+                diagnostics.add(SyncStepResult("SPOTIFY", "getLikedSongs", StepStatus.SUCCESS, orderedLikedSongs.size))
+                Log.d(TAG, "fetchSpotifyPlaylists: found ${orderedLikedSongs.size} liked songs total")
+
+                val likedPlaylistId = remoteSnapshotDao.insertPlaylistSnapshot(
+                    RemotePlaylistSnapshotEntity(
+                        syncId = syncId,
+                        source = MusicSource.SPOTIFY,
+                        sourcePlaylistId = "spotify_liked_songs",
+                        playlistName = "Liked Songs",
+                        playlistType = PlaylistType.LIKED_SONGS,
+                        trackCount = orderedLikedSongs.size,
+                        artUrl = likedPlaylistArtUrl(
+                            orderedLikedSongs.asSequence().map {
+                                it.track?.album?.images?.firstOrNull()?.url
+                            }
+                        ),
+                        partial = likedFetchPartial,
+                    )
+                )
+
+                val trackSnapshots = orderedLikedSongs.mapIndexedNotNull { index, item ->
+                    val track = item.track ?: return@mapIndexedNotNull null
+                    RemoteTrackSnapshotEntity(
+                        syncId = syncId,
+                        snapshotPlaylistId = likedPlaylistId,
+                        title = track.name,
+                        artist = track.artists.joinToString(", ") { it.name },
+                        album = track.album?.name,
+                        durationMs = track.duration_ms,
+                        spotifyUri = track.uri,
+                        albumArtUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(track.album?.images?.firstOrNull()?.url),
+                        position = index,
+                        isrc = track.isrc,
+                        explicit = track.explicit,
+                    )
+                }
+                if (trackSnapshots.isNotEmpty()) {
+                    remoteSnapshotDao.insertTrackSnapshots(trackSnapshots)
+                    likedSongCount = trackSnapshots.size
+                }
+            } else {
+                diagnostics.add(SyncStepResult("SPOTIFY", "getLikedSongs", StepStatus.EMPTY, errorMessage = "No liked songs found"))
+                Log.d(TAG, "fetchSpotifyPlaylists: liked songs empty after pagination")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "fetchSpotifyPlaylists: liked songs fetch failed (sp_dc issue), continuing", e)
+            diagnostics.add(SyncStepResult("SPOTIFY", "getLikedSongs", StepStatus.ERROR, errorMessage = e.message))
+        }
+        reportPlaylistFetched()
+
+        // Fetch user-created/saved playlists from the Spotify library.
+        var userPlaylistCount = 0
+        var inventoryComplete = true
+        try {
+            // v0.9.21: paginate libraryV3 instead of a single 50-item fetch.
+            // The previous single-call path silently capped users at ≤50
+            // playlists (often <50 since the parser drops non-Playlist
+            // library "feature" rows like LIKED_SONGS / YOUR_EPISODES on
+            // page 1). Issue #49: user with hundreds of playlists saw only
+            // 46. Loop bound is a 2000-playlist safety cap — at that scale
+            // the user likely has bigger problems than missing playlists.
+            //
+            // Issues #48/#26/#80/#136: libraryV3 is HIERARCHICAL — playlists
+            // filed inside folders never appear at the root listing. Each
+            // page now also yields folderUris; after the root walk we
+            // descend into every folder breadth-first (folders nest, so
+            // each folder page can queue more folders). Page-end is
+            // detected on rawItemCount, NOT parsed size: a 50-item page
+            // dense with folder/pseudo rows parses to few playlists, and
+            // the old post-filter "short page" check ended the whole walk
+            // right there — losing every playlist after it too.
+            val userPlaylists = mutableListOf<com.stash.data.spotify.model.SpotifyPlaylistItem>()
+            val pageSize = 50
+            val pageCap = 40
+            val maxFolderDepth = 5
+            var pagesFetched = 0
+            var foldersWalked = 0
+            val folderQueue = ArrayDeque<Pair<String, Int>>() // folder uri to depth
+            val visitedFolders = mutableSetOf<String>()
+
+            suspend fun pageThrough(folderUri: String?, depth: Int): Boolean {
+                var offset = 0
+                var complete = true
+                while (pagesFetched < pageCap) {
+                    val page = spotifyApiClient.getUserPlaylists(
+                        limit = pageSize,
+                        offset = offset,
+                        folderUri = folderUri,
+                    )
+                    // SpotifyApiClient uses this singleton as its failure/invalid-response
+                    // sentinel. A genuinely empty parsed library is a distinct instance.
+                    currentCoroutineContext().ensureActive()
+                    if (page === SpotifyLibraryPage.EMPTY) return false
+                    if (!page.isComplete) complete = false
+                    pagesFetched++
+                    userPlaylists += page.playlists
+                    for (uri in page.folderUris) {
+                        if (visitedFolders.add(uri)) folderQueue.addLast(uri to depth + 1)
+                    }
+                    if (page.rawItemCount < pageSize) return complete
+                    offset += pageSize
+                }
+                return false
+            }
+
+            inventoryComplete = pageThrough(folderUri = null, depth = 0)
+            while (folderQueue.isNotEmpty() && pagesFetched < pageCap) {
+                val (uri, depth) = folderQueue.removeFirst()
+                if (depth > maxFolderDepth) {
+                    inventoryComplete = false
+                    Log.w(TAG, "fetchSpotifyPlaylists: folder '$uri' beyond depth $maxFolderDepth, skipping")
+                    continue
+                }
+                foldersWalked++
+                if (!pageThrough(folderUri = uri, depth = depth)) inventoryComplete = false
+            }
+            if (folderQueue.isNotEmpty()) inventoryComplete = false
+
+            Log.i(
+                TAG,
+                "fetchSpotifyPlaylists: paged ${userPlaylists.size} playlists across " +
+                    "$pagesFetched page(s), $foldersWalked folder(s) descended",
+            )
+            // Drop only what the home-feed mix pass already covered (#354).
+            // distinctBy: defensive — a playlist must not snapshot twice even if
+            // Spotify ever lists it both at the root and inside a folder.
+            val customPlaylists = userPlaylists.distinctBy { it.id }.filter { playlist ->
+                keepAsLibraryPlaylist(playlist.id, playlist.name, homeFeedMixIds)
+            }
+            Log.d(TAG, "fetchSpotifyPlaylists: found ${customPlaylists.size} user playlists (filtered from ${userPlaylists.size})")
+
+            for (playlist in customPlaylists) {
+                try {
+                    // #343: fetch tracks FIRST (like the YouTube paths) so
+                    // the snapshot row can carry an HONEST partial flag. The
+                    // old order inserted the snapshot, then a failed track
+                    // fetch left it present-but-empty with partial=false —
+                    // which REFRESH mode mirror-cleared into real data loss.
+                    var fetchFailed = false
+                    val fetchedItems = try {
+                        when (val tracksResult = spotifyApiClient.getPlaylistTracks(playlist.id)) {
+                            is SyncResult.Success -> tracksResult.data
+                            is SyncResult.Empty -> emptyList()
+                            is SyncResult.Error -> {
+                                fetchFailed = true
+                                inventoryComplete = false
+                                Log.w(TAG, "fetchSpotifyPlaylists: '${playlist.name}' — error: ${tracksResult.message}")
+                                emptyList()
+                            }
+                        }
+                    } catch (e: Exception) {
+                        if (e is CancellationException) throw e
+                        fetchFailed = true
+                        inventoryComplete = false
+                        Log.w(TAG, "fetchSpotifyPlaylists: failed to fetch tracks for '${playlist.name}'", e)
+                        emptyList()
+                    }
+
+                    val playlistSnapshotId = remoteSnapshotDao.insertPlaylistSnapshot(
+                        RemotePlaylistSnapshotEntity(
+                            syncId = syncId,
+                            source = MusicSource.SPOTIFY,
+                            sourcePlaylistId = playlist.id,
+                            playlistName = playlist.name,
+                            playlistType = PlaylistType.CUSTOM,
+                            trackCount = playlist.tracks?.total ?: 0,
+                            artUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(
+                                playlist.images?.firstOrNull()?.url,
+                            ),
+                            partial = fetchFailed,
+                            expectedCount = playlist.tracks?.total,
+                        )
+                    )
+
+                    val trackSnapshots = fetchedItems.mapIndexedNotNull { index, item ->
+                        val track = item.track ?: return@mapIndexedNotNull null
+                        RemoteTrackSnapshotEntity(
+                            syncId = syncId,
+                            snapshotPlaylistId = playlistSnapshotId,
+                            title = track.name,
+                            artist = track.artists.joinToString(", ") { it.name },
+                            album = track.album?.name,
+                            durationMs = track.duration_ms,
+                            spotifyUri = track.uri,
+                            albumArtUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(track.album?.images?.firstOrNull()?.url),
+                            position = index,
+                            isrc = track.isrc,
+                            explicit = track.explicit,
+                        )
+                    }
+                    if (trackSnapshots.isNotEmpty()) {
+                        remoteSnapshotDao.insertTrackSnapshots(trackSnapshots)
+                    }
+                    if (!fetchFailed) {
+                        userPlaylistCount++
+                        Log.d(TAG, "fetchSpotifyPlaylists: '${playlist.name}' — ${trackSnapshots.size} tracks")
+                    }
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    inventoryComplete = false
+                    Log.w(TAG, "fetchSpotifyPlaylists: snapshot failed for '${playlist.name}'", e)
+                    syncLog.warn("${playlist.name} — couldn't fetch tracks (kept as-is)")
+                }
+                reportPlaylistFetched()
+            }
+
+            if (shouldDeactivateMissingPlaylists(syncPreferencesManager.spotifySyncMode.first(), inventoryComplete)) {
+                // Observed, not snapshotted — see [spotifyLivenessIds].
+                val currentIds = spotifyLivenessIds(userPlaylists.map { it.id })
+                val hidden = playlistDao.deactivateMissingSpotifyCustomPlaylists(
+                    currentSourceIds = currentIds,
+                    hasCurrentIds = currentIds.isNotEmpty(),
+                )
+                if (hidden > 0) {
+                    Log.i(TAG, "Deactivated $hidden missing Spotify custom playlist(s)")
+                    syncLog.warn("Hid $hidden Spotify playlist(s) no longer in your account")
+                }
+            }
+            diagnostics.add(
+                SyncStepResult(
+                    "SPOTIFY",
+                    "getUserPlaylists",
+                    if (inventoryComplete) StepStatus.SUCCESS else StepStatus.ERROR,
+                    userPlaylistCount,
+                    errorMessage = if (inventoryComplete) null else "inventory incomplete — a page/folder/track fetch failed mid-walk",
+                )
+            )
+        } catch (e: SpotifyApiException) {
+            throw e
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            Log.e(TAG, "fetchSpotifyPlaylists: user playlists fetch failed", e)
+            diagnostics.add(SyncStepResult("SPOTIFY", "getUserPlaylists", StepStatus.ERROR, errorMessage = e.message))
+        }
+
+        Log.d(TAG, "fetchSpotifyPlaylists: completed -- $dailyMixCount daily mixes, $likedSongCount liked songs, $userPlaylistCount user playlists")
+    }
+
+    /**
+     * Fetches Home Mixes, Liked Songs, and user playlists from YouTube Music
+     * and writes snapshot rows. Wraps the whole fetch in a single InnerTube
+     * auth-cache session so all paginated requests reuse the same cached
+     * visitor data / cookies rather than re-fetching them per page.
+     *
+     * Parallelism is capped by a shared [Semaphore] so no more than
+     * [MAX_PARALLEL_YT_FETCHES] browse requests are in-flight at once.
+     * Liked Songs runs concurrently with user-playlist discovery and
+     * per-playlist fan-out — they are fully independent.
+     */
+    private suspend fun fetchYouTubePlaylists(syncId: Long, diagnostics: MutableList<SyncStepResult>): Boolean {
+        youtubeInventoryComplete.set(true)
+        innerTubeClient.beginSyncSession()
+        val sem = Semaphore(MAX_PARALLEL_YT_FETCHES)
+        try {
+            Log.d(TAG, "fetchYouTubePlaylists: starting for syncId=$syncId")
+
+            // 1. Discover home mixes (1 serial call — needs the list before fanning out).
+            when (val result = ytMusicApiClient.getHomeMixes()) {
+                is SyncResult.Success -> {
+                    val homeMixes = result.data
+                    diagnostics.add(SyncStepResult("YOUTUBE", "getHomeMixes", StepStatus.SUCCESS, homeMixes.size))
+                    Log.d(TAG, "fetchYouTubePlaylists: found ${homeMixes.size} home mixes")
+                    coroutineScope {
+                        homeMixes.mapIndexed { index, mix ->
+                            async { sem.withPermit { fetchAndSnapshotMix(mix, index, syncId, diagnostics) } }
+                        }.awaitAll()
+                    }
+                }
+                is SyncResult.Empty -> {
+                    diagnostics.add(SyncStepResult("YOUTUBE", "getHomeMixes", StepStatus.EMPTY, errorMessage = result.reason))
+                    Log.d(TAG, "fetchYouTubePlaylists: home mixes empty: ${result.reason}")
+                }
+                is SyncResult.Error -> {
+                    diagnostics.add(SyncStepResult("YOUTUBE", "getHomeMixes", StepStatus.ERROR, errorMessage = result.message))
+                    Log.e(TAG, "fetchYouTubePlaylists: home mixes error: ${result.message}")
+                    markYoutubeIncomplete("getHomeMixes: ${result.message}")
+                }
+            }
+
+            // 2. Liked Songs runs concurrently with user-playlist discovery + per-playlist fan-out.
+            coroutineScope {
+                val likedDeferred = async { sem.withPermit { fetchAndSnapshotLikedSongs(syncId, diagnostics) } }
+
+                // Fetch user-library playlists (user-created + user-saved from
+                // Library → Playlists). These come with `PlaylistType.CUSTOM`
+                // and land in the "Other Playlists" toggle group on the Sync
+                // screen, alongside Home Mixes / Liked Songs. Built-ins
+                // (Liked Music, Episodes for Later) are filtered out by
+                // parseUserPlaylists, so no duplicate snapshot rows.
+                when (val result = ytMusicApiClient.getUserPlaylists()) {
+                    is SyncResult.Success -> {
+                        val paged = result.data
+                        val userPlaylists = paged.playlists
+                        val partialMsg = if (paged.partial) "partial library list: ${paged.partialReason}" else null
+                        diagnostics.add(
+                            SyncStepResult(
+                                "YOUTUBE",
+                                "getUserPlaylists",
+                                StepStatus.SUCCESS,
+                                userPlaylists.size,
+                                errorMessage = partialMsg,
+                            )
+                        )
+                        if (paged.partial) {
+                            Log.w(TAG, "fetchYouTubePlaylists: user playlists list partial — ${paged.partialReason}")
+                            markYoutubeIncomplete("getUserPlaylists partial: ${paged.partialReason}")
+                        }
+                        Log.d(TAG, "fetchYouTubePlaylists: found ${userPlaylists.size} user playlists")
+                        userPlaylists.map { playlist ->
+                            async { sem.withPermit { fetchAndSnapshotUserPlaylist(playlist, syncId, diagnostics) } }
+                        }.awaitAll()
+                    }
+                    is SyncResult.Empty -> {
+                        diagnostics.add(SyncStepResult("YOUTUBE", "getUserPlaylists", StepStatus.EMPTY, errorMessage = result.reason))
+                        Log.d(TAG, "fetchYouTubePlaylists: user playlists empty: ${result.reason}")
+                    }
+                    is SyncResult.Error -> {
+                        diagnostics.add(SyncStepResult("YOUTUBE", "getUserPlaylists", StepStatus.ERROR, errorMessage = result.message))
+                        Log.e(TAG, "fetchYouTubePlaylists: user playlists error: ${result.message}")
+                        markYoutubeIncomplete("getUserPlaylists: ${result.message}")
+                    }
+                }
+                val albumsDeferred = async { fetchAndSnapshotSavedAlbums(sem, syncId, diagnostics) }
+
+                if (!likedDeferred.await()) markYoutubeIncomplete("getLikedSongs leg failed")
+                albumsDeferred.await()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "YouTube Music fetch failed, continuing with other services", e)
+            diagnostics.add(SyncStepResult("YOUTUBE", "fetchYouTubePlaylists", StepStatus.ERROR, errorMessage = e.message))
+            markYoutubeIncomplete("top-level exception: ${e.message}")
+        } finally {
+            innerTubeClient.endSyncSession()
+        }
+        return youtubeInventoryComplete.get()
+    }
+
+    /**
+     * Fetches tracks for a single home mix and writes snapshot rows.
+     * Own try/catch so one failure does not abort the parallel group.
+     */
+    private suspend fun fetchAndSnapshotMix(
+        mix: YTMusicPlaylist,
+        index: Int,
+        syncId: Long,
+        diagnostics: MutableList<SyncStepResult>,
+    ) {
+        try {
+            // Fetch tracks FIRST so we know partial/expectedCount before inserting snapshot row.
+            // Home mixes are radio: cap at the initial page to avoid walking infinite continuations.
+            when (val tracksResult = ytMusicApiClient.getPlaylistTracks(mix.playlistId, maxPages = HOME_MIX_MAX_PAGES)) {
+                is SyncResult.Success -> {
+                    val paged = tracksResult.data
+                    val playlistSnapshotId = remoteSnapshotDao.insertPlaylistSnapshot(
+                        RemotePlaylistSnapshotEntity(
+                            syncId = syncId,
+                            source = MusicSource.YOUTUBE,
+                            sourcePlaylistId = mix.playlistId,
+                            playlistName = mix.title,
+                            playlistType = PlaylistType.DAILY_MIX,
+                            mixNumber = index + 1,
+                            trackCount = paged.tracks.size,
+                            artUrl = mix.thumbnailUrl,
+                            partial = paged.partial,
+                            expectedCount = paged.expectedCount,
+                        )
+                    )
+                    val trackSnapshots = paged.tracks.mapIndexed { position, track ->
+                        RemoteTrackSnapshotEntity(
+                            syncId = syncId,
+                            snapshotPlaylistId = playlistSnapshotId,
+                            title = track.title,
+                            artist = track.artists,
+                            album = track.album,
+                            durationMs = track.durationMs ?: 0L,
+                            youtubeId = track.videoId,
+                            albumArtUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(track.thumbnailUrl),
+                            position = position,
+                        )
+                    }
+                    if (trackSnapshots.isNotEmpty()) {
+                        remoteSnapshotDao.insertTrackSnapshots(trackSnapshots)
+                    }
+                    if (paged.partial) {
+                        Log.w(TAG, "fetchAndSnapshotMix: partial fetch for '${mix.title}': ${paged.partialReason}")
+                    }
+                }
+                is SyncResult.Empty -> {
+                    Log.d(TAG, "fetchAndSnapshotMix: no tracks for '${mix.title}': ${tracksResult.reason}")
+                }
+                is SyncResult.Error -> {
+                    Log.e(TAG, "fetchAndSnapshotMix: failed to fetch tracks for '${mix.title}': ${tracksResult.message}")
+                    markYoutubeIncomplete("mix '${mix.title}' tracks: ${tracksResult.message}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "fetchAndSnapshotMix: exception for '${mix.title}'", e)
+            markYoutubeIncomplete("mix '${mix.title}' exception: ${e.message}")
+        }
+        reportPlaylistFetched()
+    }
+
+    /**
+     * Fetches YouTube Music Liked Songs and writes snapshot rows.
+     * Own try/catch so a failure here does not abort the parallel group.
+     */
+    private suspend fun fetchAndSnapshotLikedSongs(
+        syncId: Long,
+        diagnostics: MutableList<SyncStepResult>,
+    ): Boolean {
+        try {
+            when (val result = ytMusicApiClient.getLikedSongs()) {
+                is SyncResult.Success -> {
+                    val paged = result.data
+                    val rawTracks = paged.tracks
+                    // Spec: DataStore corruption falls back to "everything syncs" rather than
+                    // aborting this entire sync step. runCatching keeps that fallback explicit
+                    // even though the outer try/catch would also handle a thrown exception.
+                    val studioOnly = runCatching {
+                        syncPreferencesManager.youtubeLikedStudioOnly.first()
+                    }.getOrDefault(false)
+                    val likedSongs = if (studioOnly) filterStudioOnly(rawTracks) else rawTracks
+                    val filteredCount = rawTracks.size - likedSongs.size
+
+                    // Build the annotation: partial-fetch reason + filter note (either, both, or neither).
+                    val partialNote = if (paged.partial) {
+                        "partial: ${rawTracks.size}/${paged.expectedCount ?: "?"} — ${paged.partialReason}"
+                    } else null
+                    val filterNote = if (studioOnly && filteredCount > 0) {
+                        "filtered $filteredCount UGC/podcast tracks (studio-only mode)"
+                    } else null
+                    val combinedNote = listOfNotNull(partialNote, filterNote).joinToString("; ").ifEmpty { null }
+
+                    diagnostics.add(
+                        SyncStepResult(
+                            "YOUTUBE",
+                            "getLikedSongs",
+                            StepStatus.SUCCESS,
+                            likedSongs.size,
+                            errorMessage = combinedNote,
+                        )
+                    )
+                    if (paged.partial) {
+                        Log.w(TAG, "fetchAndSnapshotLikedSongs: liked songs partial — $partialNote")
+                    }
+                    if (filterNote != null) {
+                        Log.d(TAG, "fetchAndSnapshotLikedSongs: $filterNote")
+                    }
+
+                    // Empty-after-filter: don't write a phantom playlist row.
+                    if (likedSongs.isEmpty()) {
+                        Log.d(TAG, "fetchAndSnapshotLikedSongs: all ${rawTracks.size} liked songs filtered (studio-only mode)")
+                        reportPlaylistFetched()
+                        return true  // filtered-to-empty is a legit outcome, not a fetch failure
+                    }
+
+                    val likedPlaylistId = remoteSnapshotDao.insertPlaylistSnapshot(
+                        RemotePlaylistSnapshotEntity(
+                            syncId = syncId,
+                            source = MusicSource.YOUTUBE,
+                            sourcePlaylistId = "youtube_liked_songs",
+                            playlistName = "Liked Songs",
+                            playlistType = PlaylistType.LIKED_SONGS,
+                            trackCount = likedSongs.size,
+                            artUrl = likedPlaylistArtUrl(
+                                likedSongs.asSequence().map { it.thumbnailUrl }
+                            ),
+                            partial = paged.partial,
+                            expectedCount = paged.expectedCount,
+                        )
+                    )
+
+                    val trackSnapshots = likedSongs.mapIndexed { position, track ->
+                        RemoteTrackSnapshotEntity(
+                            syncId = syncId,
+                            snapshotPlaylistId = likedPlaylistId,
+                            title = track.title,
+                            artist = track.artists,
+                            album = track.album,
+                            durationMs = track.durationMs ?: 0L,
+                            youtubeId = track.videoId,
+                            albumArtUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(track.thumbnailUrl),
+                            position = position,
+                        )
+                    }
+                    if (trackSnapshots.isNotEmpty()) {
+                        remoteSnapshotDao.insertTrackSnapshots(trackSnapshots)
+                    }
+                }
+                is SyncResult.Empty -> {
+                    diagnostics.add(SyncStepResult("YOUTUBE", "getLikedSongs", StepStatus.EMPTY, errorMessage = result.reason))
+                    Log.d(TAG, "fetchAndSnapshotLikedSongs: liked songs empty: ${result.reason}")
+                }
+                is SyncResult.Error -> {
+                    diagnostics.add(SyncStepResult("YOUTUBE", "getLikedSongs", StepStatus.ERROR, errorMessage = result.message))
+                    Log.e(TAG, "fetchAndSnapshotLikedSongs: liked songs error: ${result.message}")
+                    reportPlaylistFetched()
+                    return false
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "fetchAndSnapshotLikedSongs: exception", e)
+            diagnostics.add(SyncStepResult("YOUTUBE", "getLikedSongs", StepStatus.ERROR, errorMessage = e.message))
+            reportPlaylistFetched()
+            return false
+        }
+        reportPlaylistFetched()
+        return true
+    }
+
+        /**
+     * Fetches the user's saved-albums list, then fans out one [getAlbum]
+     * call per album to pull its tracklist and snapshot it — same pattern
+     * as the home-mix / user-playlist fan-outs above, gated by the same
+     * [sem] semaphore via the caller.
+     */
+    private suspend fun fetchAndSnapshotSavedAlbums(
+        sem: Semaphore,
+        syncId: Long,
+        diagnostics: MutableList<SyncStepResult>,
+    ) {
+        when (val result = ytMusicApiClient.getSavedAlbums()) {
+            is SyncResult.Success -> {
+                val paged = result.data
+                diagnostics.add(
+                    SyncStepResult(
+                        "YOUTUBE",
+                        "getSavedAlbums",
+                        StepStatus.SUCCESS,
+                        paged.albums.size,
+                        errorMessage = if (paged.partial) paged.partialReason else null,
+                    )
+                )
+                // Flip the shared completeness flag on a real truncation only.
+                // It gates deactivateMissingForSource for every YouTube-source
+                // playlist this run, saved albums included now that they're
+                // typed CUSTOM (#343/#348). paged.partial now comes from
+                // paginateBrowse itself — the grid probe that used to stand in
+                // for it is gone, because it fired on every paginated library.
+                if (paged.partial) markYoutubeIncomplete("getSavedAlbums partial: ${paged.partialReason}")
+                Log.d(TAG, "fetchAndSnapshotSavedAlbums: found ${paged.albums.size} saved albums")
+                coroutineScope {
+                    paged.albums.map { album ->
+                        async { sem.withPermit { fetchAndSnapshotSavedAlbum(album, syncId, diagnostics) } }
+                    }.awaitAll()
+                }
+            }
+            is SyncResult.Empty -> {
+                diagnostics.add(SyncStepResult("YOUTUBE", "getSavedAlbums", StepStatus.EMPTY, errorMessage = result.reason))
+                Log.d(TAG, "fetchAndSnapshotSavedAlbums: no saved albums: ${result.reason}")
+            }
+            is SyncResult.Error -> {
+                diagnostics.add(SyncStepResult("YOUTUBE", "getSavedAlbums", StepStatus.ERROR, errorMessage = result.message))
+                Log.e(TAG, "fetchAndSnapshotSavedAlbums: error: ${result.message}")
+                markYoutubeIncomplete("getSavedAlbums: ${result.message}")
+            }
+        }
+    }
+
+    /**
+     * Fetches one saved album's full tracklist via [YTMusicApiClient.getAlbum]
+     * (album browseIds don't route through [YTMusicApiClient.getPlaylistTracks])
+     * and writes snapshot rows. Own try/catch so one album failing doesn't
+     * abort the rest.
+     *
+     * [getAlbum] never returns null — per its kdoc, a failed/blocked fetch
+     * comes back with a blank title, which is treated as a per-album failure
+     * here (mirrors the playlist legs' `SyncResult.Error` handling).
+     */
+    private suspend fun fetchAndSnapshotSavedAlbum(
+        album: com.stash.data.ytmusic.model.AlbumSummary,
+        syncId: Long,
+        diagnostics: MutableList<SyncStepResult>,
+    ) {
+        try {
+            val detail = ytMusicApiClient.getAlbum(album.id)
+            if (detail.title.isBlank()) {
+                Log.w(TAG, "fetchAndSnapshotSavedAlbum: empty detail for '${album.title}' (${album.id})")
+                markYoutubeIncomplete("album '${album.title}' detail fetch failed")
+                reportPlaylistFetched()
+                return
+            }
+            val coverUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(
+                detail.thumbnailUrl ?: album.thumbnailUrl,
+            )
+            val playlistSnapshotId = remoteSnapshotDao.insertPlaylistSnapshot(
+                RemotePlaylistSnapshotEntity(
+                    syncId = syncId,
+                    source = MusicSource.YOUTUBE,
+                    sourcePlaylistId = album.id,
+                    playlistName = detail.title,
+                    // CUSTOM, not a dedicated ALBUM type — see PR discussion.
+                    // A saved album is diffed, toggled, and deactivated
+                    // through the exact same path as any synced playlist;
+                    // no code path needs to distinguish them yet, and adding
+                    // a type without a display/filter surface everywhere
+                    // PlaylistType is switched on is worse than not adding it.
+                    playlistType = PlaylistType.CUSTOM,
+                    trackCount = detail.tracks.size,
+                    artUrl = coverUrl,
+                )
+            )
+            val trackSnapshots = detail.tracks.mapIndexed { position, track ->
+                RemoteTrackSnapshotEntity(
+                    syncId = syncId,
+                    snapshotPlaylistId = playlistSnapshotId,
+                    title = track.title,
+                    artist = track.artist,
+                    album = track.album ?: detail.title,
+                    durationMs = (track.durationSeconds * 1000).toLong(),
+                    youtubeId = track.videoId,
+                    albumArtUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(
+                        track.thumbnailUrl ?: detail.thumbnailUrl,
+                    ),
+                    position = position,
+                )
+            }
+            if (trackSnapshots.isNotEmpty()) {
+                remoteSnapshotDao.insertTrackSnapshots(trackSnapshots)
+            }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            Log.e(TAG, "fetchAndSnapshotSavedAlbum: exception for '${album.title}'", e)
+            markYoutubeIncomplete("album '${album.title}' exception: ${e.message}")
+        }
+        reportPlaylistFetched()
+    }
+
+    /**
+     * Fetches tracks for a single user playlist and writes snapshot rows.
+     * Own try/catch so one failure does not abort the parallel group.
+     */
+    private suspend fun fetchAndSnapshotUserPlaylist(
+        playlist: YTMusicPlaylist,
+        syncId: Long,
+        diagnostics: MutableList<SyncStepResult>,
+    ) {
+        try {
+            // Fetch tracks FIRST so we know partial/expectedCount before inserting snapshot row.
+            when (val tracksResult = ytMusicApiClient.getPlaylistTracks(playlist.playlistId)) {
+                is SyncResult.Success -> {
+                    val trackedPaged = tracksResult.data
+                    val playlistSnapshotId = remoteSnapshotDao.insertPlaylistSnapshot(
+                        RemotePlaylistSnapshotEntity(
+                            syncId = syncId,
+                            source = MusicSource.YOUTUBE,
+                            sourcePlaylistId = playlist.playlistId,
+                            playlistName = playlist.title,
+                            playlistType = PlaylistType.CUSTOM,
+                            trackCount = trackedPaged.tracks.size,
+                            artUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(playlist.thumbnailUrl),
+                            partial = trackedPaged.partial,
+                            expectedCount = trackedPaged.expectedCount,
+                        )
+                    )
+                    val trackSnapshots = trackedPaged.tracks.mapIndexed { position, track ->
+                        RemoteTrackSnapshotEntity(
+                            syncId = syncId,
+                            snapshotPlaylistId = playlistSnapshotId,
+                            title = track.title,
+                            artist = track.artists,
+                            album = track.album,
+                            durationMs = track.durationMs ?: 0L,
+                            youtubeId = track.videoId,
+                            albumArtUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(track.thumbnailUrl),
+                            position = position,
+                        )
+                    }
+                    if (trackSnapshots.isNotEmpty()) {
+                        remoteSnapshotDao.insertTrackSnapshots(trackSnapshots)
+                    }
+                    if (trackedPaged.partial) {
+                        Log.w(TAG, "fetchAndSnapshotUserPlaylist: partial fetch for '${playlist.title}': ${trackedPaged.partialReason}")
+                    }
+                }
+                is SyncResult.Empty -> {
+                    Log.d(TAG, "fetchAndSnapshotUserPlaylist: no tracks for '${playlist.title}': ${tracksResult.reason}")
+                }
+                is SyncResult.Error -> {
+                    Log.e(TAG, "fetchAndSnapshotUserPlaylist: failed tracks for '${playlist.title}': ${tracksResult.message}")
+                    markYoutubeIncomplete("playlist '${playlist.title}' tracks: ${tracksResult.message}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "fetchAndSnapshotUserPlaylist: exception for '${playlist.title}'", e)
+            markYoutubeIncomplete("playlist '${playlist.title}' exception: ${e.message}")
+        }
+        reportPlaylistFetched()
+    }
+}
+
+/**
+ * Filters out UGC and PODCAST_EPISODE tracks. Used by the
+ * "Studio recordings only" Liked Songs preference.
+ *
+ * Tracks with [MusicVideoType.ATV], [MusicVideoType.OMV],
+ * [MusicVideoType.OFFICIAL_SOURCE_MUSIC], or `null` (parser-couldn't-classify)
+ * pass through. Null is preserved deliberately so a parser regression
+ * doesn't silently drop legitimate studio tracks.
+ */
+internal fun filterStudioOnly(tracks: List<YTMusicTrack>): List<YTMusicTrack> =
+    tracks.filter {
+        it.musicVideoType != MusicVideoType.UGC &&
+        it.musicVideoType != MusicVideoType.PODCAST_EPISODE
+    }
+
+/**
+ * Outcome of running the two [com.stash.core.data.sync.auth.AuthHealthProbe]
+ * implementations at the head of a sync run.
+ *
+ * @property state Per-source expiry flags to write to
+ *  [SyncStateManager.onAuthExpiryProbed]. Drives the AuthExpiredBanner UI.
+ * @property fetchSpotify `true` when the Spotify fetch should run — i.e.
+ *  Spotify is connected AND its probe did not report expired.
+ * @property fetchYoutube `true` when the YouTube fetch should run — same
+ *  rule for YouTube.
+ *
+ * [shortCircuit] is DERIVED from these: the worker aborts only when there is
+ * nothing left to fetch (every connected source expired). When just one of
+ * several sources is expired the chain proceeds and the worker skips only
+ * that source — this is intentionally NOT `state.anyExpired`. The fetch flags
+ * are the single source of truth shared by the short-circuit decision and the
+ * per-source fetch gate in [PlaylistFetchWorker.doWork], so the two can never
+ * disagree about which sources are usable.
+ */
+internal data class AuthProbeResult(
+    val state: AuthExpiryState,
+    val fetchSpotify: Boolean,
+    val fetchYoutube: Boolean,
+) {
+    val shortCircuit: Boolean get() = !fetchSpotify && !fetchYoutube
+}
+
+/**
+ * Runs [spotifyProbe] and [youtubeProbe] in parallel, but only for sources
+ * the caller reports as connected. Skipping disconnected sources is critical
+ * UX — a user who never linked YouTube must never see a "YouTube expired"
+ * banner just because the probe network call would fail.
+ *
+ * [spotifyConnected]/[youtubeConnected] MUST be the same `isAuthenticated()`
+ * values [PlaylistFetchWorker.doWork] uses to gate the actual fetch, so the
+ * "is this source usable" predicate is identical for the short-circuit
+ * decision and the fetch — they cannot drift to two different signals.
+ *
+ * Extracted from [PlaylistFetchWorker.doWork] so the orchestration can be
+ * unit-tested without spinning up a HiltWorker/WorkerParameters harness for
+ * an @AssistedInject worker. See [PlaylistFetchWorkerAuthProbeTest].
+ */
+internal suspend fun runAuthProbes(
+    spotifyConnected: Boolean,
+    youtubeConnected: Boolean,
+    spotifyProbe: SpotifyAuthHealthProbe,
+    youtubeProbe: YoutubeAuthHealthProbe,
+): AuthProbeResult = coroutineScope {
+    val spotifyDeferred = async {
+        if (spotifyConnected) spotifyProbe.isExpired() else false
+    }
+    val youtubeDeferred = async {
+        if (youtubeConnected) youtubeProbe.isExpired() else false
+    }
+
+    val state = AuthExpiryState(
+        spotifyExpired = spotifyDeferred.await(),
+        youtubeExpired = youtubeDeferred.await(),
+    )
+    // Per-source gating: a source is fetchable only when it's connected AND not
+    // expired. shortCircuit (derived) is true only when NEITHER is fetchable,
+    // so a single expired source can't nuke a healthy one — the per-source
+    // banner still surfaces from `state`. This is what stops a YouTube
+    // false-positive from killing an otherwise-fine Spotify sync.
+    AuthProbeResult(
+        state = state,
+        fetchSpotify = spotifyConnected && !state.spotifyExpired,
+        fetchYoutube = youtubeConnected && !state.youtubeExpired,
+    )
+}

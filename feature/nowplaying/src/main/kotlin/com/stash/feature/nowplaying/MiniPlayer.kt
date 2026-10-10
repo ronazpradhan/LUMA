@@ -1,0 +1,194 @@
+package com.stash.feature.nowplaying
+
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material3.Icon
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import com.stash.core.common.primaryArtist
+import com.stash.core.media.listen.ListenTogetherState
+import com.stash.feature.nowplaying.listen.ListenTogetherViewModel
+import com.stash.feature.nowplaying.listen.MiniSessionFaces
+
+/**
+ * Compact mini player bar that sits above the bottom navigation.
+ *
+ * Shows album art thumbnail, track title and artist, play/pause and skip next
+ * buttons, plus a thin progress indicator at the top. Slides in/out based on
+ * whether a track is currently loaded.
+ *
+ * @param onExpand Callback invoked when the user taps the bar to expand
+ *                 into the full Now Playing screen.
+ * @param modifier Standard Compose [Modifier].
+ * @param viewModel The shared [NowPlayingViewModel] provided by Hilt.
+ */
+@Composable
+fun MiniPlayer(
+    onExpand: () -> Unit,
+    modifier: Modifier = Modifier,
+    /** LUMA: the glass bottom chrome passes a see-through color and its own shape. */
+    containerColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
+    shape: androidx.compose.ui.graphics.Shape = androidx.compose.ui.graphics.RectangleShape,
+    viewModel: NowPlayingViewModel = hiltViewModel(),
+    listen: ListenTogetherViewModel = hiltViewModel(),
+) {
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val together by listen.state.collectAsStateWithLifecycle()
+
+    AnimatedVisibility(
+        visible = uiState.hasTrack,
+        enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+        exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+    ) {
+        val dominantColor = uiState.dominantColor
+
+        Surface(
+            modifier = modifier
+                .fillMaxWidth()
+                .clip(shape)
+                .clickable(onClick = onExpand),
+            color = containerColor,
+            shape = shape,
+            tonalElevation = if (containerColor.alpha < 0.9f) 0.dp else 2.dp,
+        ) {
+            Column {
+                // Thin progress bar at the very top of the mini player.
+                LinearProgressIndicator(
+                    progress = { uiState.progressFraction },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.dp),
+                    color = dominantColor,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                )
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    // Album art thumbnail.
+                    val track = uiState.currentTrack
+                    val artModel = track?.albumArtPath ?: track?.albumArtUrl
+
+                    if (artModel != null) {
+                        AsyncImage(
+                            model = ImageRequest.Builder(LocalContext.current)
+                                .data(artModel)
+                                .build(),
+                            contentDescription = "Album art",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(RoundedCornerShape(8.dp)),
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.MusicNote,
+                            contentDescription = null,
+                            modifier = Modifier.size(48.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+
+                    // Track title and artist.
+                    Column(modifier = Modifier.weight(1f)) {
+                        // primaryArtist() collapses collaboration credits
+                        // ("Metro Boomin, Travis Scott" → "Metro Boomin").
+                        // remember keeps the split off the hot path: this
+                        // composable recomposes on every progress tick.
+                        val artist = remember(track?.artist) { track?.artist?.primaryArtist() }
+                        Text(
+                            text = track?.title ?: "",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = artist ?: "",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+
+                    (together as? ListenTogetherState.InRoom)?.let { MiniSessionFaces(it) }
+
+                    // Play / Pause button — spinner while the track is still
+                    // resolving/buffering (e.g. a slow YouTube-fallback resolve).
+                    IconButton(onClick = viewModel::onPlayPauseClick, enabled = !uiState.isBuffering) {
+                        if (uiState.isBuffering) {
+                            CircularProgressIndicator(
+                                color = MaterialTheme.colorScheme.onSurface,
+                                strokeWidth = 2.5.dp,
+                                modifier = Modifier.size(24.dp),
+                            )
+                        } else {
+                            Icon(
+                                imageVector = if (uiState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                contentDescription = if (uiState.isPlaying) "Pause" else "Play",
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.size(28.dp),
+                            )
+                        }
+                    }
+
+                    // Skip next button. A Listen Together listener can't skip the room's song: the slot stays, empty,
+                    // so play/pause doesn't move when the host role changes hands.
+                    if (com.stash.core.ui.components.LocalListenTogetherRole.current == com.stash.core.ui.components.ListenTogetherRole.LISTENER) {
+                        Spacer(Modifier.size(48.dp))
+                    } else {
+                        IconButton(onClick = viewModel::onSkipNext) {
+                            Icon(
+                                imageVector = Icons.Default.SkipNext,
+                                contentDescription = "Next",
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.size(24.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

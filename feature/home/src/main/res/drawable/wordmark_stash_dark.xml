@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- LUMA wordmark (dark theme): the crescent mark followed by the letters L U M A. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="180dp"
+    android:height="48dp"
+    android:viewportWidth="450"
+    android:viewportHeight="120">
+    <group android:translateX="-48" android:translateY="-48" android:scaleX="2" android:scaleY="2">
+        <path
+            android:fillColor="#F1E8D6"
+            android:pathData="M51.51,32.14 A22,22 0 1,0 75.42,59.03 A18,18 0 1,1 51.51,32.14 Z" />
+        <path
+            android:fillColor="#C9BEFF"
+            android:pathData="M72,36 m-3.2,0 a3.2,3.2 0 1,0 6.4,0 a3.2,3.2 0 1,0 -6.4,0" />
+    </group>
+    <path
+        android:strokeColor="#F1E8D6"
+        android:strokeWidth="11"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M150,28 V92 H188 M212,28 V66 A26,26 0 0,0 264,66 V28 M290,92 V28 L322,68 L354,28 V92 M378,92 L405,28 L432,92 M389,68 H421" />
+</vector>

@@ -1,0 +1,35 @@
+ffmpeg version n6.0-android Copyright (c) 2000-2023 the FFmpeg developers
+  built with Android (7714059, based on r416183c1) clang version 12.0.8
+  configuration: --enable-cross-compile --target-os=android --arch=aarch64
+Input #0, flac, from '/data/user/0/com.stash.app.debug/files/music/young-marble-giants/singles/final-day.flac':
+  Duration: 00:01:44.00, start: 0.000000, bitrate: 702 kb/s
+  Stream #0:0: Audio: flac, 44100 Hz, stereo, s16
+Stream mapping:
+  Stream #0:0 -> #0:0 (flac (native) -> pcm_s16le (native))
+Press [q] to stop, [?] for help
+Output #0, null, to 'pipe:':
+  Metadata:
+    encoder         : Lavf60.3.100
+  Stream #0:0: Audio: pcm_s16le, 44100 Hz, stereo, s16, 1411 kb/s
+[Parsed_ebur128_0 @ 0x7b8f2fd200] t: 0.0999792   TARGET:-23 LUFS    M: -70.0 S: -70.0     I: -70.0 LUFS       LRA:   0.0 LU  FTPK: -22.1 -21.9 dBFS  TPK: -22.1 -21.9 dBFS
+[Parsed_ebur128_0 @ 0x7b8f2fd200] t: 0.199979   TARGET:-23 LUFS    M: -70.0 S: -70.0     I: -70.0 LUFS       LRA:   0.0 LU  FTPK: -20.4 -20.2 dBFS  TPK: -20.4 -20.2 dBFS
+[Parsed_ebur128_0 @ 0x7b8f2fd200] t: 0.299979   TARGET:-23 LUFS    M: -70.0 S: -70.0     I: -70.0 LUFS       LRA:   0.0 LU  FTPK: -18.7 -18.5 dBFS  TPK: -18.7 -18.5 dBFS
+[Parsed_ebur128_0 @ 0x7b8f2fd200] t: 0.399979   TARGET:-23 LUFS    M: -12.4 S: -70.0     I: -12.4 LUFS       LRA:   0.0 LU  FTPK: -8.1 -7.9 dBFS   TPK: -8.1 -7.9 dBFS
+[Parsed_ebur128_0 @ 0x7b8f2fd200] t: 0.499979   TARGET:-23 LUFS    M: -11.9 S: -70.0     I: -12.1 LUFS       LRA:   0.0 LU  FTPK: -6.0 -5.8 dBFS   TPK: -6.0 -5.8 dBFS
+[Parsed_ebur128_0 @ 0x7b8f2fd200] t: 103.9      TARGET:-23 LUFS    M: -10.2 S: -10.4     I:  -9.8 LUFS       LRA:   5.9 LU  FTPK: -2.2 -2.0 dBFS   TPK:  0.3  0.3 dBFS
+size=N/A time=00:01:44.00 bitrate=N/A speed=48.2x
+video:0kB audio:17925kB subtitle:0kB other streams:0kB global headers:0kB muxing overhead: unknown
+[Parsed_ebur128_0 @ 0x7b8f2fd200] Summary:
+
+  Integrated loudness:
+    I:          -9.8 LUFS
+    Threshold: -20.2 LUFS
+
+  Loudness range:
+    LRA:         5.9 LU
+    Threshold: -30.7 LUFS
+    LRA low:   -13.9 LUFS
+    LRA high:   -8.0 LUFS
+
+  True peak:
+    Peak:        0.3 dBFS

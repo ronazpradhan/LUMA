@@ -1,0 +1,2 @@
+frame=  100 fps=0.0 q=-0.0 size=N/A time=00:00:04.18 bitrate=N/A speed=  17x
+frame=  200 fps=190 q=-0.0 size=N/A time=00:00:08.36 bitrate=N/A speed=15.9x

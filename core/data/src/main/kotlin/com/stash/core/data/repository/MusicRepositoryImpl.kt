@@ -1,0 +1,1394 @@
+package com.stash.core.data.repository
+
+import android.content.Context
+import android.net.Uri
+import androidx.documentfile.provider.DocumentFile
+import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
+import androidx.work.await
+import com.stash.core.common.matchesArtistCredits
+import com.stash.core.data.db.dao.AlbumSummary
+import com.stash.core.data.db.dao.ArtistSummary
+import com.stash.core.data.db.dao.PlaylistDao
+import com.stash.core.data.db.dao.SyncHistoryDao
+import com.stash.core.data.db.dao.TrackDao
+import com.stash.core.data.db.entity.SyncHistoryEntity
+import com.stash.core.data.mapper.toDomain
+import com.stash.core.data.mapper.toEntity
+import com.stash.core.data.mix.LastFmRecommendationSource
+import com.stash.core.data.sync.workers.DiscoveryDownloadWorker
+import com.stash.core.data.sync.workers.constraintsForManualTrigger
+import com.stash.core.model.Playlist
+import com.stash.core.model.Track
+import com.stash.core.model.share.toTrack
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.retryWhen
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import javax.inject.Inject
+import androidx.core.net.toUri
+import com.stash.core.data.db.dao.fileUsedByAnotherTrack
+
+/**
+ * Default [MusicRepository] implementation backed by Room DAOs.
+ *
+ * All Flow-returning methods delegate directly to the DAO layer and map
+ * entities to domain models via extension functions in the mapper package.
+ */
+class MusicRepositoryImpl @Inject constructor(
+    @ApplicationContext private val context: Context,
+    private val trackDao: TrackDao,
+    private val playlistDao: PlaylistDao,
+    private val syncHistoryDao: SyncHistoryDao,
+    private val downloadQueueDao: com.stash.core.data.db.dao.DownloadQueueDao,
+    private val discoveryQueueDao: com.stash.core.data.db.dao.DiscoveryQueueDao,
+    private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
+    private val trackMatcher: com.stash.core.data.sync.TrackMatcher,
+    private val stashMixRecipeDao: com.stash.core.data.db.dao.StashMixRecipeDao,
+    private val downloadNetworkPreference: com.stash.core.data.prefs.DownloadNetworkPreference,
+    private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
+    private val localFileOps: com.stash.core.data.files.LocalFileOps,
+    private val syncPreferencesManager: com.stash.core.data.sync.SyncPreferencesManager,
+    private val singleTrackDownloadEnqueuer: com.stash.core.data.sync.SingleTrackDownloadEnqueuer,
+    private val lastFmRecommendationSource: LastFmRecommendationSource,
+    private val sharedMixDao: com.stash.core.data.db.dao.SharedMixDao,
+) : MusicRepository {
+
+    // ── Deletion event plumbing ─────────────────────────────────────────
+    //
+    // Every repo method that actually removes a track file + DB row emits
+    // the track id here. The player (and any future component that holds
+    // references to tracks) subscribes once and reacts automatically, so
+    // new delete entry-points can't forget to tell the player.
+    //
+    // Buffer is generous so emits from a cascade-delete loop don't suspend
+    // the caller (we use tryEmit).
+    /**
+     * Deleted track ids, consumed by PlayerRepositoryImpl to evict them from the
+     * live queue. Every event is load-bearing: a missed one leaves a deleted track
+     * playable, pointing at a file that no longer exists — the exact symptom a user
+     * reported (a removed song carrying on playing).
+     *
+     * Emitted with `emit`, NOT `tryEmit`. All five call sites are suspend functions,
+     * so real backpressure is available: a slow consumer makes the deleter wait
+     * instead of silently dropping the notification. `tryEmit` never suspends — on a
+     * full buffer it returns false, and all five sites ignored the result, so a bulk
+     * delete (`cleanOrphanedMixTracks`, a multi-select removal) could exceed the
+     * buffer and lose evictions with nothing logged.
+     *
+     * The buffer still exists so the common single-delete case never blocks; it is
+     * headroom now rather than the only thing standing between us and data loss.
+     */
+    private val _trackDeletions = MutableSharedFlow<Long>(
+        replay = 0,
+        extraBufferCapacity = 64,
+    )
+    override val trackDeletions: SharedFlow<Long> = _trackDeletions.asSharedFlow()
+
+    /**
+     * Deletes the audio file at [path]. Handles both app-internal paths
+     * (plain `java.io.File`) and SAF-backed external storage URIs (the
+     * `content://...` strings returned by [com.stash.data.download.files.FileOrganizer]
+     * when the user has picked an SD card / USB-OTG folder).
+     *
+     * Returns true on successful unlink. Best-effort: false just means the
+     * file was already gone, the SAF grant was revoked, or I/O failed.
+     */
+    private fun deleteTrackFile(path: String): Boolean = runCatching {
+        if (path.startsWith("content://")) {
+            DocumentFile.fromSingleUri(context, path.toUri())?.delete() == true
+        } else {
+            val plainPath = if (path.startsWith("file://")) {
+                path.toUri().path ?: path.removePrefix("file://")
+            } else {
+                path
+            }
+            java.io.File(plainPath).delete()
+        }
+    }.getOrDefault(false)
+
+    /**
+     * Deletes [trackId]'s audio file at [path], unless another track still
+     * records it (see [fileUsedByAnotherTrack]): rows that came to share one
+     * file keep it until the last of them lets it go. The caller clears or
+     * removes the row either way.
+     */
+    private suspend fun deleteTrackAudio(trackId: Long, path: String) {
+        if (trackDao.fileUsedByAnotherTrack(path, trackId)) return
+        deleteTrackFile(path)
+    }
+
+    /** Startup fixups — resets exhausted retries, purges seeder data, and
+     *  clears interrupted sync records. */
+    suspend fun runMigrations() {
+        // Reset exhausted retries so tracks get another chance each app session.
+        downloadQueueDao.resetExhaustedRetries()
+
+        // Mark any sync runs left in a non-terminal state (from a killed
+        // process, reboot, etc.) as FAILED so the home screen's sync status
+        // card doesn't read "Syncing..." forever.
+        val resetSyncs = syncHistoryDao.resetStaleSyncs()
+        if (resetSyncs > 0) {
+            android.util.Log.i("StashMigrations", "Reset $resetSyncs stale sync record(s)")
+        }
+
+        // One-time cleanup of filler tracks/playlists created by the original
+        // DatabaseSeeder. The seeder used distinctive file paths and source IDs
+        // that do not collide with real sync data. Safe to run on every startup
+        // — becomes a no-op once cleaned. See DAO KDoc for details.
+        val deletedTracks = trackDao.deleteSeederTracks()
+        val deletedPlaylists = playlistDao.deleteSeederPlaylists()
+        if (deletedTracks > 0 || deletedPlaylists > 0) {
+            android.util.Log.i(
+                "StashMigrations",
+                "Cleaned seeder data: $deletedTracks tracks, $deletedPlaylists playlists",
+            )
+        }
+
+        // Fix duplicate playlist_tracks entries that accumulated from daily mix
+        // sync runs. Each sync added new tracks at the same positions without
+        // removing old ones, causing multiple tracks at position 1, 2, etc.
+        // This cleanup keeps only the most recently added entry for each
+        // (playlist_id, track_id) pair and removes the rest.
+        deduplicatePlaylistTracks()
+
+        // v0.9.21: removed the periodic art-URL upgrade passes. ArtUrlUpgrader
+        // now runs at every sync write site (PlaylistFetchWorker for both
+        // tracks and playlists, DiffWorker for the new-row path) so URLs land
+        // already-upgraded. A re-process on every launch is dead weight —
+        // bandwidth + compute the user doesn't want to pay. Users on
+        // pre-fix builds get HQ art on their next sync; clearing app data
+        // forces an immediate refresh.
+
+        // NOTE: backfillSpotifyDateAdded() was removed — it ran on every startup and
+        // overwrote all Spotify tracks' date_added with the same timestamp, making
+        // "Recently Added" show arbitrary tracks instead of actual recent downloads.
+
+        // v0.9.21: file integrity sweep — finds tracks marked is_downloaded=1
+        // whose file has vanished from disk and resets them to undownloaded.
+        // Without this, getDoneTrackIdsForRecipe surfaces them as mix
+        // survivors (they pass the is_downloaded=1 filter) but playback fails
+        // because the file is gone. Run BEFORE cleanOrphanedMixTracks so the
+        // sweep itself doesn't choke on stale paths. See conversation
+        // 2026-05-12: tracks with FLAC quality + album art + no audible
+        // playback because the file was missing.
+        reconcileMissingDownloadedFiles()
+
+        // Clean up orphaned mix tracks — downloaded tracks whose playlist was
+        // refreshed and that no longer belong to any playlist. Deletes their
+        // audio files and DB rows to free storage. Safe to run every startup;
+        // becomes a no-op when there are no orphans.
+        cleanOrphanedMixTracks()
+
+        // v0.9.21: cancel pending download_queue rows whose tracks no
+        // longer belong to any sync-enabled playlist. Catches the
+        // pre-fix-install case where a user deselected a playlist before
+        // SyncViewModel learned to clean up — those queue rows would
+        // drain indefinitely otherwise. Idempotent.
+        val cancelledOrphans = downloadQueueDao.cancelDownloadsWithNoEnabledPlaylist()
+        if (cancelledOrphans > 0) {
+            android.util.Log.i(
+                "StashMigrations",
+                "cancelled $cancelledOrphans orphan PENDING download(s) — tracks have no enabled playlist",
+            )
+        }
+    }
+
+    /**
+     * Download-integrity sweep (runs every launch via [runMigrations]). Checks
+     * every `is_downloaded=1` row's file against [LocalFileOps.classify]:
+     *  - reliably MISSING or TOO_SMALL (a failed download's tiny garbage body)
+     *    -> the row is un-marked (`is_downloaded`/`file_path`/`file_size_bytes`
+     *    cleared) so it streams / re-downloads; junk files are also deleted.
+     *  - OK or INCONCLUSIVE -> left untouched. INCONCLUSIVE (a SAF document
+     *    whose size couldn't be read at cold start) is the safety valve: we
+     *    never un-mark or delete on an ambiguous read, so a flaky boot can't
+     *    damage a real external-storage library.
+     *
+     * Handles both plain filesystem paths and SAF `content://` URIs. Null/blank
+     * paths count toward `nullPath` and are un-marked.
+     */
+    private suspend fun reconcileMissingDownloadedFiles() {
+        val refs = trackDao.getDownloadedFileRefs()
+        if (refs.isEmpty()) return
+
+        // A downloaded row is unusable when its file is reliably missing OR too
+        // small to be real audio (a ~274-byte failed-download body). classify()
+        // distinguishes those from an INCONCLUSIVE SAF read (provider didn't
+        // report a size / transient cold-start failure), which we must NOT act
+        // on — un-marking/deleting on an ambiguous read could damage a real
+        // external-storage library on a flaky boot.
+        val result = classifyDownloadedRefs(refs) {
+            localFileOps.classify(it, com.stash.core.common.constants.StashConstants.MIN_PLAYABLE_LOCAL_BYTES)
+        }
+
+        if (result.resetIds.isEmpty()) {
+            android.util.Log.d("StashMigrations", "download integrity: all ${refs.size} downloaded files usable")
+            return
+        }
+
+        // Delete the junk files (present-but-tiny). Missing/null-path rows
+        // contribute no path. Best-effort, SAF-aware.
+        result.junkPaths.forEach { localFileOps.delete(it) }
+
+        // Un-mark the unusable rows in chunks to stay under SQLite's parameter
+        // ceiling — they become not-downloaded and therefore streamable.
+        result.resetIds.chunked(500).forEach { chunk ->
+            trackDao.bulkResetForReDownload(chunk)
+        }
+        android.util.Log.i(
+            "StashMigrations",
+            "download integrity: scanned ${refs.size} downloaded rows, reset ${result.resetIds.size} " +
+                "unusable (junk-deleted=${result.junkPaths.size}, nullPath=${result.nullPath})",
+        )
+    }
+
+    // ── Track queries ───────────────────────────────────────────────────
+
+    override fun getAllTracks(): Flow<List<Track>> =
+        trackDao.getLibraryByDateAdded()
+            // #380 root-cause fix lives in the DAO: a narrow projection
+            // (rows small enough that realistic libraries fit one
+            // ~2 MB CursorWindow), `is_downloaded = 1` in SQL instead
+            // of the in-memory filter below, and @Transaction so each
+            // emission reads one consistent snapshot even when a
+            // playlist delete mutates `tracks` mid-query (the old
+            // SELECT * re-executed per window refill and raced the
+            // delete — issues #14/#380). This retry predates that fix;
+            // it stays as the last-resort belt for any CursorWindow
+            // surprise a vendor SQLite build cooks up. Cap at 3
+            // attempts so a non-race failure doesn't loop forever.
+            .retryWhen { cause, attempt ->
+                val raced = cause is IllegalStateException &&
+                    cause.message?.contains("CursorWindow") == true
+                raced && attempt < 3
+            }
+            .map { rows -> rows.map { it.toDomain() } }
+
+    override fun getTracksByArtist(artist: String): Flow<List<Track>> =
+        trackDao.getByArtist(artist)
+            .map { entities ->
+                entities
+                    .filter { matchesArtistCredits(it.artist, it.albumArtist, artist) }
+                    .map { it.toDomain() }
+            }
+            // The matchesArtistCredits post-filter is O(n) over the SQL
+            // candidate superset and off the main thread.
+            .flowOn(Dispatchers.Default)
+
+    // v0.9.30 Path A: Library Songs/Albums/Artists views are curated =
+    // downloaded-only, always. Streaming mode does NOT change what shows
+    // in those Library sub-views — it would only expose ghost rows from
+    // historic failed downloads. The Spotify/Apple Music mental model:
+    // Library is YOUR saved music; search/streaming is a separate surface.
+    //
+    // EXCEPTION: getTracksByPlaylist. A playlist shows ALL of its tracks,
+    // streamable and downloaded, in every mode — streaming is always allowed,
+    // and tapping a streamable track streams it. (Until 2026-09-17 this
+    // followed the Online/Offline switch and hid streamable rows offline.)
+    // Tap-time playability is governed by live connectivity, not a preference.
+    @OptIn(ExperimentalCoroutinesApi::class)
+    override fun getTracksByPlaylist(playlistId: Long): Flow<List<Track>> =
+        trackDao.getByPlaylist(playlistId, includeStreamable = true)
+            .map { entities -> entities.map { it.toDomain() } }
+
+    /**
+     * Artists for the Library Artists tab: downloaded tracks only, like the
+     * Songs and Albums tabs (Liked and playlist detail show everything). Not
+     * tied to the Download switch — since v0.9.107 that switch decides what
+     * Sync writes to disk, never what a screen shows. If the Library is ever
+     * widened to stream-only content, widen this AND
+     * `ArtistImageDao.distinctArtistNames` together, so photos are resolved
+     * for exactly the artists the tab lists.
+     */
+    override fun getAllArtists(): Flow<List<ArtistSummary>> =
+        trackDao.getAllArtists(includeStreamable = false)
+
+    override fun getAllAlbums(): Flow<List<AlbumSummary>> =
+        trackDao.getAllAlbums(includeStreamable = false)
+
+    override fun getRecentlyAdded(limit: Int): Flow<List<Track>> =
+        trackDao.getRecentlyAdded(limit).map { entities -> entities.map { it.toDomain() } }
+
+    override fun getMostPlayed(limit: Int): Flow<List<Track>> =
+        trackDao.getMostPlayed(limit).map { entities -> entities.map { it.toDomain() } }
+
+    override fun search(query: String): Flow<List<Track>> {
+        val sanitized = "\"${query.replace("\"", "").trim()}\""
+        if (sanitized == "\"\"") return flowOf(emptyList())
+        return trackDao.search(sanitized, includeStreamable = false)
+            .map { entities -> entities.map { it.toDomain() } }
+    }
+
+    override suspend fun findByYoutubeIds(videoIds: Collection<String>): List<Track> =
+        videoIds.mapNotNull { trackDao.findByYoutubeId(it)?.toDomain() }
+
+    override suspend fun applyStashMixesEnabled(enabled: Boolean) {
+        val wm = androidx.work.WorkManager.getInstance(context)
+        if (enabled) {
+            // Recipes + playlists first so the workers wake up to active state.
+            stashMixRecipeDao.setActiveForBuiltins(true)
+            playlistDao.setActiveForBuiltinMixes(true)
+            // Re-schedule the five periodic workers. Cheap idempotent operation —
+            // KEEP-policy means duplicate enqueues no-op.
+            val mode = downloadNetworkPreference.current()
+            com.stash.core.data.sync.workers.StashMixRefreshWorker.schedulePeriodic(context)
+            com.stash.core.data.sync.workers.StashDiscoveryWorker.schedulePeriodic(context, mode)
+            com.stash.core.data.sync.workers.TagEnrichmentWorker.schedulePeriodic(context, mode)
+            com.stash.core.data.sync.workers.TrackInfoEnrichmentWorker.schedulePeriodic(context)
+            // Fire a one-shot refresh so the surfaces repopulate immediately
+            // rather than waiting for the next periodic cycle.
+            com.stash.core.data.sync.workers.StashMixRefreshWorker.enqueueOneTime(context)
+            // The Last.fm source (#255) is a STASH_MIX but NOT a builtin, so
+            // the sweeps above miss it in both directions. reconcile() re-
+            // derives its state from session + toggle + this switch, so one
+            // call restores it here and hides it below — no second copy of
+            // the predicate to drift.
+            runCatching { lastFmRecommendationSource.reconcile() }
+        } else {
+            // Cancel periodic + one-shot work by unique name. The constants
+            // live inside the workers as private vals; the names are stable
+            // and grepped from each worker (see core/data/.../sync/workers/).
+            for (name in STASH_MIX_WORK_NAMES) {
+                wm.cancelUniqueWork(name)
+            }
+            // Hide the surfaces. Recipes off → refresh no-op even if a worker
+            // somehow slips through. Playlists off → invisible to Library/Home
+            // queries that filter on is_active = 1.
+            stashMixRecipeDao.setActiveForBuiltins(false)
+            playlistDao.setActiveForBuiltinMixes(false)
+            // Same single call as the enable branch: reconcile() reads the
+            // now-persisted master switch and deactivates the Last.fm recipe
+            // and its playlist without deleting anything.
+            runCatching { lastFmRecommendationSource.reconcile() }
+        }
+    }
+
+    override suspend fun backfillAlbumForTracks(
+        videoIds: Collection<String>,
+        album: String,
+        albumArtist: String,
+    ) {
+        if (album.isBlank() && albumArtist.isBlank()) return
+        videoIds.forEach { videoId ->
+            val existing = trackDao.findByYoutubeId(videoId) ?: return@forEach
+            if (album.isNotBlank() && existing.album.isBlank()) {
+                trackDao.updateAlbumIfEmpty(existing.id, album)
+            }
+            if (albumArtist.isNotBlank() && existing.albumArtist.isBlank()) {
+                trackDao.updateAlbumArtistIfEmpty(existing.id, albumArtist)
+            }
+        }
+    }
+
+    override suspend fun getAllDownloadedTracks(): List<Track> =
+        trackDao.getAllDownloaded().map { it.toDomain() }
+
+    override fun getTrackCount(): Flow<Int> =
+        trackDao.getTotalCount(includeStreamable = false)
+
+    override fun getTotalStorageBytes(): Flow<Long> =
+        trackDao.getTotalStorageBytes()
+
+    override fun getFlacTrackCount(): Flow<Int> =
+        trackDao.getFlacCount()
+
+    override fun getFlacStorageBytes(): Flow<Long> =
+        trackDao.getFlacStorageBytes()
+
+    override fun getSpotifyDownloadedCount(): Flow<Int> =
+        trackDao.getSpotifyDownloadedCount()
+
+    override fun getYouTubeDownloadedCount(): Flow<Int> =
+        trackDao.getYouTubeDownloadedCount()
+
+    // ── Playlist queries ────────────────────────────────────────────────
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    override fun getAllPlaylists(): Flow<List<Playlist>> =
+        // The one accessor behind Home and Library. Visibility is gated by
+        // PlaylistDao.getAllVisible: sync-enabled, pinned, or holding something
+        // playable — and since streaming is always allowed, a streamable track
+        // counts in every mode. (This was hard-coded false from v0.9.30, so once
+        // #368 stopped auto-enabling discovered mixes a fresh Online install had
+        // no arm left and Home rendered empty over a full library — #477, #478;
+        // then it followed the mode; now it is simply true.)
+        playlistDao.getAllVisible(includeStreamable = true)
+            .map { entities -> entities.map { it.toDomain() } }
+
+    override fun getPlaylistsByType(type: com.stash.core.model.PlaylistType): Flow<List<Playlist>> =
+        playlistDao.getByType(type).map { entities -> entities.map { it.toDomain() } }
+
+    override fun observeLikeState(trackId: Long): Flow<com.stash.core.data.db.dao.TrackLikeState?> =
+        trackDao.observeLikeState(trackId)
+
+    override fun observeTrackById(trackId: Long): Flow<Track?> =
+        trackDao.observeById(trackId).map { it?.toDomain() }
+
+    override fun observeTrackByYoutubeId(youtubeId: String): Flow<Track?> =
+        trackDao.observeByYoutubeId(youtubeId).map { it?.toDomain() }
+
+    override fun observePlaylist(id: Long): Flow<Playlist?> =
+        playlistDao.getByIdFlow(id).map { it?.toDomain() }
+
+    override suspend fun getPlaylistWithTracks(id: Long): Playlist? {
+        val result = playlistDao.getPlaylistWithTracks(id) ?: return null
+        return result.playlist.toDomain().copy(
+            tracks = result.tracks.map { it.toDomain() },
+        )
+    }
+
+    // ── Mutations ───────────────────────────────────────────────────────
+
+    override suspend fun recordPlay(trackId: Long) {
+        trackDao.incrementPlayCount(trackId)
+        trackDao.updateLastPlayed(trackId, System.currentTimeMillis())
+    }
+
+    override suspend fun insertTrack(track: Track): Long =
+        trackDao.insert(track.toEntity())
+
+    override suspend fun ensureTrackPersisted(track: Track): Long {
+        // Quick exit: real DB row already.
+        if (track.id > 0L) {
+            val existing = trackDao.getById(track.id)
+            if (existing != null) {
+                backfillFrom(existing, track)
+                return track.id
+            }
+        }
+
+        // Dedup by every UNIQUE key — youtube_id, then spotify_uri — before the
+        // canonical fuzzy match. Missing spotify_uri here used to be harmless
+        // (REPLACE silently absorbed the collision by wiping the existing row);
+        // now that insert ABORTs, an un-deduped spotify_uri would THROW, so a
+        // Spotify track whose canonical identity drifted (feat./remaster tags)
+        // must still resolve to its existing row by URI.
+        val youtubeId = track.youtubeId
+        if (!youtubeId.isNullOrBlank()) {
+            trackDao.findByYoutubeId(youtubeId)?.let { existing ->
+                backfillFrom(existing, track)
+                return existing.id
+            }
+        }
+        val spotifyUri = track.spotifyUri
+        if (!spotifyUri.isNullOrBlank()) {
+            trackDao.findBySpotifyUri(spotifyUri)?.let { existing ->
+                backfillFrom(existing, track)
+                return existing.id
+            }
+        }
+        val cTitle = canonicalizeIdentity(track.title)
+        val cArtist = canonicalizeIdentity(track.artist)
+        if (cTitle.isNotBlank() && cArtist.isNotBlank()) {
+            trackDao.findByCanonicalIdentity(cTitle, cArtist)?.let { existing ->
+                // Fuzzy title/artist match: could be a different recording (radio edit vs album),
+                // and lossless trusts ISRC, so only duration is taken here.
+                backfillFrom(existing, track, trustIsrc = false)
+                return existing.id
+            }
+        }
+
+        // Insert a fresh stub — id = 0 so Room autogens.
+        return trackDao.insert(
+            track.toEntity().copy(
+                id = 0L,
+                canonicalTitle = cTitle,
+                canonicalArtist = cArtist,
+                isStreamable = true,
+            )
+        )
+    }
+
+    override suspend fun ensureExactTrackPersisted(track: com.stash.core.model.share.SharedTrack): Long {
+        // Blank ids from a peer become null, so no row gets youtube_id = "" or "spotify:track:".
+        val incoming = track.toTrack().let { t ->
+            t.copy(
+                youtubeId = t.youtubeId?.ifBlank { null },
+                spotifyUri = track.spotifyId?.takeIf { it.isNotBlank() }?.let { "spotify:track:$it" },
+                isrc = t.isrc?.ifBlank { null },
+            )
+        }
+        val existing = incoming.youtubeId?.let { trackDao.findByYoutubeId(it) }
+            ?: incoming.spotifyUri?.let { trackDao.findBySpotifyUri(it) }
+            ?: incoming.isrc?.let { trackDao.findByIsrc(it) }
+        if (existing != null) {
+            backfillFrom(existing, incoming) // an exact match is the same recording, so its ISRC is trusted
+            return existing.id
+        }
+        return trackDao.insert(
+            incoming.toEntity().copy(
+                id = 0L,
+                canonicalTitle = canonicalizeIdentity(incoming.title),
+                canonicalArtist = canonicalizeIdentity(incoming.artist),
+                isStreamable = true,
+            ),
+        )
+    }
+
+    /**
+     * Fills a matched row's blanks from the incoming track. Album is deliberately not backfilled:
+     * without album_artist it would split the Albums tab's (album, album_artist) grouping.
+     */
+    private suspend fun backfillFrom(existing: com.stash.core.data.db.entity.TrackEntity, incoming: Track, trustIsrc: Boolean = true) {
+        if (existing.durationMs <= 0L && incoming.durationMs > 0L) trackDao.backfillDurationIfMissing(existing.id, incoming.durationMs)
+        if (trustIsrc) incoming.isrc?.takeIf { it.isNotBlank() }?.let { trackDao.backfillIsrcIfMissing(existing.id, it) }
+    }
+
+    /** Same normalization as [SearchDownloadCoordinator.canonicalize] — kept
+     *  local to avoid leaking that private helper out of `:data:download`. */
+    private fun canonicalizeIdentity(s: String): String =
+        s.lowercase()
+            .replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+    override suspend fun deleteTrack(track: Track): Boolean {
+        // Best-effort file deletion -- the file may already be gone.
+        track.filePath?.let { deleteTrackAudio(track.id, it) }
+        // Album art lives in the app cache (internal only) but route it
+        // through the same helper so a future SAF-backed art cache would
+        // work without another code change.
+        track.albumArtPath?.let { deleteTrackFile(it) }
+        trackDao.delete(track.toEntity())
+        _trackDeletions.emit(track.id)
+        return true
+    }
+
+    // ── User-initiated download / remove-download ─────────────────────
+    //
+    // These methods feed the same `download_queue` infrastructure that
+    // sync uses, but mark `sync_id = null` so the rows land in the
+    // discovery-worker partition. Removal nulls the file_path / flags
+    // but keeps the row so the track remains streamable (Path A).
+
+    override suspend fun queueDownload(trackId: Long): Boolean {
+        val entity = trackDao.getById(trackId) ?: return false
+        if (entity.isDownloaded) return false
+
+        // Reuse an existing queue row if there is one; otherwise insert a fresh
+        // manual (discovery-partition) row. A manual tap is an explicit
+        // "download this now", so a pre-existing non-terminal row must NOT make
+        // this a silent no-op: previously a stuck sync row (streaming-mode
+        // PENDING / deferred WAITING_FOR_LOSSLESS) made every already-synced
+        // track report "Couldn't queue download". Reset the row to PENDING so it
+        // downloads fresh. Either way the row is the user's own request
+        // (user_requested), so a playlist's Download switch going off never
+        // deletes it (#474). The reset is one write that reports a row the
+        // leftover cleanup deleted after the read (#532): then a fresh row is filed.
+        val queueId = downloadQueueDao.getByTrackId(trackId)?.id
+            ?.takeIf { downloadQueueDao.requeueForTap(it) == 1 }
+            ?: downloadQueueDao.insert(
+                com.stash.core.data.db.entity.DownloadQueueEntity(
+                    trackId = trackId,
+                    syncId = null,
+                    searchQuery = "${entity.artist} - ${entity.title}",
+                    youtubeUrl = entity.youtubeId?.let { "https://music.youtube.com/watch?v=$it" },
+                    userRequested = true,
+                )
+            )
+
+        // Drive THIS row through TrackDownloadWorker single-track mode, which
+        // downloads regardless of streaming mode and the sync/discovery
+        // partition — unlike the chain/discovery drains, which skip in streaming
+        // mode (the reason the stuck sync rows never drained).
+        singleTrackDownloadEnqueuer.enqueue(queueId)
+        return true
+    }
+
+    override suspend fun removeDownload(trackId: Long) {
+        val entity = trackDao.getById(trackId) ?: return
+        entity.filePath?.let { deleteTrackAudio(trackId, it) }
+        // Drop pending/in-flight queue entries so a fresh download can't
+        // immediately repopulate the file we just removed.
+        downloadQueueDao.deleteByTrackId(trackId)
+        trackDao.clearDownloadState(trackId)
+        // Deliberately no trackDeletions emit — the row is still alive.
+        // ExoPlayer's open FD on the unlinked file keeps the currently-
+        // playing track audible through track end (Unix semantics). The
+        // next play picks up the streaming path naturally.
+    }
+
+    override suspend fun queueDownloadsForPlaylist(playlistId: Long, background: Boolean): Int {
+        val queued = insertDownloadsForPlaylist(playlistId)
+        if (queued > 0) startDiscoveryDrain(background)
+        return queued
+    }
+
+    override suspend fun queueKeptPlaylists(manualSync: Boolean): Int {
+        // After every sync, in either mode: what stopped being wanted since the
+        // last one (a song taken out of a kept playlist, say) goes now, not at
+        // the next app start, which can be days away.
+        dropLeftoverDownloads()
+        // Every playlist's rows first, then one drain: a drain per playlist
+        // would restart it each time and cancel the song in progress.
+        val queued = playlistDao.getKeepOfflinePlaylistIds().sumOf { insertKeptPlaylist(it) }
+        // Nothing new still restarts a drain for songs already waiting, whose
+        // run was cancelled or cut short. "Sync now" downloads on any network,
+        // like that sync's own download step (SyncScheduler.triggerManualSync).
+        if (queued > 0 || downloadQueueDao.hasPendingDiscoveryDownload()) {
+            startDiscoveryDrain(background = true, anyNetwork = manualSync)
+        }
+        return queued
+    }
+
+    /**
+     * Starts a drain when a download is waiting for one, and never otherwise:
+     * the worker shows its notification before it looks at the queue, so an
+     * empty start would flash it. The drain reads only rows the user asked for
+     * (a tap, a kept playlist, a followed mix with Download on:
+     * [com.stash.core.data.db.dao.DownloadQueueDao.pendingDiscoveryDownloads], #532),
+     * so cold start calls this too: a run that was cancelled or cut short picks
+     * up again under the background constraints. Waiting means PENDING: failed
+     * songs retry when a drain runs for real work, not on their own at every start.
+     *
+     * Leftovers nobody asked for are dropped first, at cold start right after the
+     * stale IN_PROGRESS reset, so none is left counted as queued.
+     */
+    override suspend fun resumeWaitingDownloads(tap: Boolean) {
+        dropLeftoverDownloads()
+        if (downloadQueueDao.hasPendingDiscoveryDownload()) startDiscoveryDrain(background = !tap)
+    }
+
+    /**
+     * Drops the download rows nobody asked for (#532): no drain takes them any
+     * more, so they would sit in Downloads as queued forever. Never fails its
+     * caller: the start that follows matters more than the cleanup.
+     */
+    private suspend fun dropLeftoverDownloads() {
+        try {
+            val dropped = downloadQueueDao.cancelLeftoverDiscoveryDownloads()
+            if (dropped > 0) {
+                android.util.Log.i("MusicRepository", "cancelled $dropped leftover download(s) nobody asked for")
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("MusicRepository", "cancelling leftover downloads failed", e)
+        }
+    }
+
+    /**
+     * Starts the drain for the rows just queued. The unique work keeps only one
+     * drain's constraints, so the two kinds of caller use different policies:
+     *
+     * - A tap wants the songs now, on any network, but never cancels a song in
+     *   progress. With nothing downloading it takes over (REPLACE), a waiting
+     *   background run's Wi-Fi rule included, cancelling nothing. With a song
+     *   downloading it queues behind that run, unless one already waits there:
+     *   the waiting run reads the queue when it starts.
+     * - Background work downloads the way a sync does and never cancels the
+     *   song in progress: it joins a drain that is waiting to start, or queues
+     *   one behind the drain that is running. [anyNetwork] is "Sync now".
+     *
+     * One caller at a time ([DRAIN_START_LOCK]): a cold start and a sync can
+     * both read "nothing waiting" at once, and both would enqueue.
+     *
+     * ponytail: a tap's drain takes every waiting row, background ones too, on
+     * the tap's network. Keeping those back needs a per-row marker.
+     */
+    // internal, not private, only so MusicRepositoryDownloadSwitchRaceTest can stub it on a spy.
+    internal suspend fun startDiscoveryDrain(background: Boolean, anyNetwork: Boolean = false) {
+        if (!background) {
+            val constraints = constraintsForManualTrigger(downloadNetworkPreference.current())
+            DRAIN_START_LOCK.withLock {
+                val runs = WorkManager.getInstance(context)
+                    .getWorkInfosForUniqueWorkFlow(DiscoveryDownloadWorker.UNIQUE_WORK_NAME).first()
+                val policy = when {
+                    runs.none { it.state == WorkInfo.State.RUNNING } -> ExistingWorkPolicy.REPLACE
+                    runs.none { it.state == WorkInfo.State.ENQUEUED || it.state == WorkInfo.State.BLOCKED } ->
+                        ExistingWorkPolicy.APPEND_OR_REPLACE
+                    else -> return
+                }
+                DiscoveryDownloadWorker.enqueueOneTime(context, constraints, policy).await()
+            }
+            return
+        }
+        DRAIN_START_LOCK.withLock {
+            val runs = WorkManager.getInstance(context)
+                .getWorkInfosForUniqueWorkFlow(DiscoveryDownloadWorker.UNIQUE_WORK_NAME).first()
+            // The Sync tab's "Wi-Fi only", exactly as SyncScheduler builds a sync's
+            // own download step: never charging, which belongs to the recommendations
+            // setting (DownloadNetworkMode), not to downloads. Read fresh every time:
+            // a waiting run keeps the rule it was created with.
+            val network = if (anyNetwork || !syncPreferencesManager.preferences.first().wifiOnly) {
+                NetworkType.CONNECTED
+            } else {
+                NetworkType.UNMETERED
+            }
+            val running = runs.any { it.state == WorkInfo.State.RUNNING }
+            val waiting = runs.filter { it.state == WorkInfo.State.ENQUEUED || it.state == WorkInfo.State.BLOCKED }
+            val policy = when {
+                // None waiting: start one, or queue it behind the running one,
+                // whose snapshot of the queue is already taken.
+                waiting.isEmpty() -> ExistingWorkPolicy.APPEND_OR_REPLACE
+                // A waiting run reads the queue when it starts, so it takes these
+                // rows too; stacking another would show the notification once per
+                // run. Unless it waits for Wi-Fi this start doesn't need (Wi-Fi
+                // only was turned off, or "Sync now"): with nothing running,
+                // replacing it cancels nothing.
+                !running && network == NetworkType.CONNECTED &&
+                    waiting.any { it.constraints.requiredNetworkType == NetworkType.UNMETERED } ->
+                    ExistingWorkPolicy.REPLACE
+                else -> return
+            }
+            val constraints = Constraints.Builder()
+                .setRequiredNetworkType(network)
+                .setRequiresBatteryNotLow(true)
+                .build()
+            DiscoveryDownloadWorker.enqueueOneTime(context, constraints, policy).await()
+        }
+    }
+
+    /**
+     * Queue rows only, no drain: see [queueKeptPlaylists]. Returns rows queued.
+     * [stillWanted] is asked again right before inserting: a kept playlist's
+     * switch can go off while this checks each song (#474).
+     */
+    private suspend fun insertDownloadsForPlaylist(
+        playlistId: Long,
+        stillWanted: suspend () -> Boolean = { true },
+    ): Int {
+        // Stream-only mode never runs the sync's download step, so songs an
+        // earlier Download-mode sync queued would wait forever (and count as
+        // handled below). Hand them to the drain this starts instead.
+        val moved = if (streamingPreference.current()) downloadQueueDao.moveSyncRowsToDiscovery(playlistId) else 0
+        val tracks = trackDao.getByPlaylist(playlistId, includeStreamable = true)
+            .first()
+        // A match the user dismissed stays dismissed, and a track with a row
+        // already queued, failed or cancelled keeps that one row. That makes
+        // this safe to call after every sync (#474) without re-trying the same
+        // unmatchable songs, or piling duplicate rows into Failed downloads.
+        val candidates = tracks.filter { !it.isDownloaded && !it.matchDismissed }
+        if (candidates.isEmpty()) return moved
+
+        val entries = candidates.mapNotNull { entity ->
+            if (downloadQueueDao.hasRowToLeaveAlone(entity.id)) return@mapNotNull null
+            com.stash.core.data.db.entity.DownloadQueueEntity(
+                trackId = entity.id,
+                syncId = null,
+                searchQuery = "${entity.artist} - ${entity.title}",
+                youtubeUrl = entity.youtubeId?.let { "https://music.youtube.com/watch?v=$it" },
+            )
+        }
+        if (!stillWanted()) return 0
+        if (entries.isNotEmpty()) downloadQueueDao.insertAll(entries)
+        return moved + entries.size
+    }
+
+    /**
+     * A kept playlist's missing songs (#474), queued with [KEEP_OFFLINE_LOCK]
+     * held and the switch read again right before inserting. An off that lands
+     * while this checks each song wins (nothing is queued); one that lands
+     * later waits for the lock, then deletes what this queued.
+     */
+    private suspend fun insertKeptPlaylist(playlistId: Long): Int = KEEP_OFFLINE_LOCK.withLock {
+        val kept: suspend () -> Boolean = { playlistDao.getById(playlistId)?.keepOffline == true }
+        if (kept()) insertDownloadsForPlaylist(playlistId, stillWanted = kept) else 0
+    }
+
+    /** A kept playlist's missing songs, queued and started like a tap. */
+    internal suspend fun queueKeptPlaylist(playlistId: Long) {
+        if (insertKeptPlaylist(playlistId) > 0) startDiscoveryDrain(background = false)
+    }
+
+    override suspend fun setYouTubeAutoDownload(
+        type: com.stash.core.model.PlaylistType,
+        on: Boolean,
+        onlyTurnOn: Boolean,
+    ) {
+        if (onlyTurnOn && !on) return
+        playlistDao.getActivePlaylistsBySource(com.stash.core.model.MusicSource.YOUTUBE)
+            .filter { it.type == type && it.keepOffline != on }
+            .forEach { setPlaylistDownload(it.id, on) }
+    }
+
+    override suspend fun setPlaylistDownload(playlistId: Long, on: Boolean) {
+        // The switch itself is written first, outside the lock, so a flip lands
+        // at once, even while an earlier one is still queueing: that one reads
+        // it again before inserting. The last position wins.
+        playlistDao.setKeepOffline(playlistId, on)
+        if (on) {
+            queueKeptPlaylist(playlistId)
+            return
+        }
+        KEEP_OFFLINE_LOCK.withLock {
+            // Off stops what hasn't started: the songs still waiting go (a song
+            // running now finishes). Songs already downloaded stay (owner's call).
+            downloadQueueDao.cancelWaitingForPlaylist(playlistId)
+            if (!streamingPreference.current()) {
+                // Download mode: a synced playlist downloads through sync, so off
+                // has to turn that off too, exactly as the Sync tab's switch does:
+                // sync off, then drop sync-queued songs no synced playlist wants.
+                // No Home unpin.
+                playlistDao.setSyncEnabled(playlistId, false)
+                downloadQueueDao.cancelDownloadsWithNoEnabledPlaylist()
+            }
+        }
+    }
+
+    /** A playlist kept on the phone (#474) downloads what the user adds to it. Never fails the add. */
+    private suspend fun queueIfKeptOffline(playlistId: Long) {
+        try {
+            if (playlistDao.getById(playlistId)?.keepOffline == true) queueKeptPlaylist(playlistId)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("MusicRepository", "queueIfKeptOffline: playlist $playlistId failed", e)
+        }
+    }
+
+    override suspend fun removeDownloadsForPlaylist(playlistId: Long): Int {
+        val tracks = trackDao.getByPlaylist(playlistId, includeStreamable = true)
+            .first()
+        val downloaded = tracks.filter { it.isDownloaded }
+        for (entity in downloaded) {
+            // Two of the playlist's songs on one file: it goes with the second,
+            // once the first's row no longer records it.
+            entity.filePath?.let { deleteTrackAudio(entity.id, it) }
+            downloadQueueDao.deleteByTrackId(entity.id)
+            trackDao.clearDownloadState(entity.id)
+        }
+        return downloaded.size
+    }
+
+    override suspend fun removePlaylist(playlist: Playlist) {
+        takeDownSharedLinkIfOwned(playlist.id)
+        // A playlist that downloads its songs takes its downloads that haven't started
+        // with it, now (#532): the queue has no link to playlists, and an unfollowed mix
+        // still downloading would otherwise leave its songs listed as queued until the
+        // next cleanup. Under the switch's lock, so a kept playlist's queueing can't add
+        // rows between the two.
+        KEEP_OFFLINE_LOCK.withLock {
+            if (downloadsItsSongs(playlist.id)) downloadQueueDao.cancelWaitingForPlaylist(playlist.id)
+            playlistDao.delete(playlist.toEntity())
+        }
+    }
+
+    /**
+     * Whether [playlistId]'s own switch downloads its songs (#474): kept on the phone, or a
+     * followed mix with "Download this mix" on. Only then does removing it cancel anything
+     * (#532): removing any other playlist changes nothing the user asked for, and cancelling
+     * there deleted failed taps from before v0.9.110 that the leftover cleanup keeps for their
+     * Retry. A followed mix is told by its source id, not its follow: unfollow deletes the
+     * follow before the playlist. Read from the database: the caller's copy can be stale.
+     */
+    private suspend fun downloadsItsSongs(playlistId: Long): Boolean {
+        val playlist = playlistDao.getById(playlistId) ?: return false
+        return playlist.keepOffline || (playlist.syncEnabled && playlist.sourceId.startsWith("share:"))
+    }
+
+    /**
+     * The shared_mixes row (and its edit key) cascades away with the playlist, so an owned, still
+     * active share must queue its server DELETE first or the link stays live forever. Followers
+     * never qualify: unfollowing must not take the owner's mix down.
+     */
+    private suspend fun takeDownSharedLinkIfOwned(playlistId: Long) {
+        val row = sharedMixDao.forPlaylist(playlistId) ?: return
+        val key = row.editKey ?: return
+        if (row.role == com.stash.core.data.db.entity.SharedMixEntity.ROLE_OWNER &&
+            row.status == com.stash.core.data.db.entity.SharedMixEntity.STATUS_ACTIVE
+        ) {
+            com.stash.core.data.share.SharedMixUnshareWorker.enqueue(context, row.shareId, key)
+        }
+    }
+
+    override suspend fun updatePlaylistArtUrl(playlistId: Long, artUrl: String?) {
+        playlistDao.updateArtUrl(playlistId, artUrl)
+    }
+
+    override suspend fun setPlaylistPinned(playlistId: Long, pinned: Boolean) {
+        playlistDao.setPinned(playlistId, pinned)
+    }
+
+    override suspend fun setPlaylistPinnedToHome(playlistId: Long, pinnedAt: Long?) {
+        playlistDao.setPinnedToHome(playlistId, pinnedAt)
+    }
+
+    // ── Custom playlist management ──────────────────────────────────────
+
+    override suspend fun createPlaylist(name: String): Long {
+        val entity = com.stash.core.data.db.entity.PlaylistEntity(
+            name = name,
+            source = com.stash.core.model.MusicSource.BOTH,
+            sourceId = "custom_${java.util.UUID.randomUUID()}",
+            type = com.stash.core.model.PlaylistType.CUSTOM,
+            isActive = true,
+            syncEnabled = true,
+        )
+        return playlistDao.insert(entity)
+    }
+
+    override suspend fun ensureCustomPlaylist(name: String, sourceId: String, artUrl: String?): Long =
+        playlistDao.ensurePlaylist(
+            com.stash.core.data.db.entity.PlaylistEntity(
+                name = name,
+                source = com.stash.core.model.MusicSource.BOTH,
+                sourceId = sourceId,
+                type = com.stash.core.model.PlaylistType.CUSTOM,
+                isActive = true,
+                syncEnabled = true,
+                artUrl = artUrl,
+            ),
+        )
+
+    override suspend fun addTrackToPlaylist(trackId: Long, playlistId: Long) {
+        insertIntoPlaylist(trackId, playlistId)
+        queueIfKeptOffline(playlistId)
+    }
+
+    /** One add, without the keep-offline queue, so a batch queues once at the end. */
+    private suspend fun insertIntoPlaylist(trackId: Long, playlistId: Long) {
+        // Issue #114: this previously inserted the cross-ref unconditionally
+        // and crashed the app with SQLITE_CONSTRAINT_FOREIGNKEY when either
+        // parent row was missing (track orphaned by cleanup, playlist deleted
+        // by a parallel REFRESH-mode sync, stale UI cache after re-sync, etc.).
+        // Defensive pre-check + try/catch so the crash becomes a logged no-op
+        // and the user can keep using the app.
+        val trackExists = trackDao.getById(trackId) != null
+        val playlistExists = playlistDao.getById(playlistId) != null
+        if (!trackExists || !playlistExists) {
+            android.util.Log.w(
+                "MusicRepository",
+                "addTrackToPlaylist: skipping insert — trackExists=$trackExists " +
+                    "(id=$trackId), playlistExists=$playlistExists (id=$playlistId)",
+            )
+            return
+        }
+        val position = playlistDao.getNextPosition(playlistId)
+        try {
+            playlistDao.insertCrossRef(
+                com.stash.core.data.db.entity.PlaylistTrackCrossRef(
+                    playlistId = playlistId,
+                    trackId = trackId,
+                    position = position,
+                    // v0.9.23: mark as user-added so REFRESH-mode sync of
+                    // imported Spotify / YT Music playlists doesn't wipe it.
+                    // See issue #42.
+                    locallyAdded = true,
+                )
+            )
+        } catch (e: android.database.sqlite.SQLiteConstraintException) {
+            // Pre-check raced with a delete (orphan cleanup, sync REFRESH, blocklist).
+            // The user-visible effect is the same as a missing-parent no-op: the
+            // tap appears to do nothing, but the app stays alive.
+            android.util.Log.w(
+                "MusicRepository",
+                "addTrackToPlaylist: FK constraint failed after pre-check " +
+                    "(trackId=$trackId, playlistId=$playlistId) — likely race with delete",
+                e,
+            )
+            return
+        }
+        // v0.9.37 — count downloaded + streamable. Stream-only tracks
+        // (e.g. Liked Songs added from the Now Playing heart on a
+        // streaming track) are first-class playlist members under the
+        // streaming-engine model and must be reflected in the badge,
+        // or the Library card lies ("1 tracks" but the detail shows 4).
+        val count = trackDao.getByPlaylist(playlistId, includeStreamable = true).first().size
+        playlistDao.updateTrackCount(playlistId, count)
+        if (sharedMixDao.forPlaylist(playlistId)?.role == com.stash.core.data.db.entity.SharedMixEntity.ROLE_OWNER) {
+            com.stash.core.data.share.SharedMixPublishWorker.enqueue(context, delaySeconds = 30)
+        }
+    }
+
+    override suspend fun addTracksToPlaylist(trackIds: List<Long>, playlistId: Long) {
+        // ponytail: no app-wide scope exists, so NonCancellable keeps the batch alive.
+        withContext(NonCancellable) {
+            trackIds.forEach { id ->
+                runCatching { insertIntoPlaylist(id, playlistId) }.onFailure { e ->
+                    android.util.Log.w("MusicRepository", "addTracksToPlaylist: track $id failed", e)
+                }
+            }
+            queueIfKeptOffline(playlistId)
+        }
+    }
+
+    // Queues through addTracksToPlaylist (a brand-new playlist is never kept offline, so it's a no-op today).
+    override suspend fun createPlaylistWithTracks(name: String, trackIds: List<Long>): Long =
+        withContext(NonCancellable) { createPlaylist(name).also { addTracksToPlaylist(trackIds, it) } }
+
+    override suspend fun ensureDownloadsMixSeeded(): Long {
+        return playlistDao.ensurePlaylist(downloadsMixEntity())
+    }
+
+    override suspend fun linkTrackToDownloadsMix(trackId: Long) {
+        val playlistId = playlistDao.ensurePlaylistAndActiveCrossRef(
+            playlist = downloadsMixEntity(),
+            trackId = trackId,
+        )
+        val count = trackDao.getByPlaylist(playlistId, includeStreamable = true).first().size
+        playlistDao.updateTrackCount(playlistId, count)
+    }
+
+    private fun downloadsMixEntity() =
+        com.stash.core.data.db.entity.PlaylistEntity(
+            name = "Your Downloads",
+            source = com.stash.core.model.MusicSource.BOTH,
+            sourceId = DOWNLOADS_MIX_SOURCE_ID,
+            type = com.stash.core.model.PlaylistType.DOWNLOADS_MIX,
+            syncEnabled = false,
+        )
+
+    override suspend fun removeTrackFromPlaylist(trackId: Long, playlistId: Long) {
+        playlistDao.softDeleteTrackFromPlaylist(playlistId, trackId)
+        // v0.9.37 — count downloaded + streamable. Stream-only tracks
+        // (e.g. Liked Songs added from the Now Playing heart on a
+        // streaming track) are first-class playlist members under the
+        // streaming-engine model and must be reflected in the badge,
+        // or the Library card lies ("1 tracks" but the detail shows 4).
+        val count = trackDao.getByPlaylist(playlistId, includeStreamable = true).first().size
+        playlistDao.updateTrackCount(playlistId, count)
+        if (sharedMixDao.forPlaylist(playlistId)?.role == com.stash.core.data.db.entity.SharedMixEntity.ROLE_OWNER) {
+            com.stash.core.data.share.SharedMixPublishWorker.enqueue(context, delaySeconds = 30)
+        }
+    }
+
+    override fun getUserCreatedPlaylists(): Flow<List<com.stash.core.model.Playlist>> =
+        playlistDao.getUserCreatedPlaylists().map { entities -> entities.map { it.toDomain() } }
+
+    override fun getPickablePlaylists(): Flow<List<com.stash.core.model.Playlist>> =
+        playlistDao.getPickablePlaylists().map { entities -> entities.map { it.toDomain() } }
+
+    // ── Unmatched tracks ────────────────────────────────────────────────
+
+    override fun getUnmatchedTracks(): Flow<List<com.stash.core.data.db.dao.UnmatchedTrackView>> =
+        downloadQueueDao.getUnmatchedTracks()
+
+    override fun getUnmatchedCount(): Flow<Int> =
+        downloadQueueDao.getUnmatchedCount()
+
+    override suspend fun dismissMatch(trackId: Long) {
+        trackDao.dismissMatch(trackId)
+        downloadQueueDao.deleteByTrackId(trackId)
+    }
+
+    // ── Wrong-match flagging ────────────────────────────────────────────
+
+    override suspend fun setMatchFlagged(trackId: Long, flagged: Boolean) {
+        trackDao.updateMatchFlagged(trackId, flagged)
+    }
+
+    override fun getFlaggedTracks(): Flow<List<com.stash.core.data.db.entity.TrackEntity>> =
+        trackDao.getFlaggedTracks()
+
+    override fun getFlaggedCount(): Flow<Int> =
+        trackDao.getFlaggedCount()
+
+    // ── Blacklist + cascade deletion ────────────────────────────────────
+
+    override suspend fun removeTrackFromPlaylistAndMaybeDelete(
+        trackId: Long,
+        fromPlaylistId: Long,
+        alsoBlacklist: Boolean,
+    ): MusicRepository.CascadeRemovalSummary =
+        removeAndMaybeDelete(trackId, fromPlaylistId, alsoBlacklist).also {
+            // Every path detaches the track, so the Library card's count must follow.
+            // A block also recounts every other playlist that held it (BlocklistGuard.block).
+            val count = trackDao.getByPlaylist(fromPlaylistId, includeStreamable = true).first().size
+            playlistDao.updateTrackCount(fromPlaylistId, count)
+        }
+
+    private suspend fun removeAndMaybeDelete(
+        trackId: Long,
+        fromPlaylistId: Long,
+        alsoBlacklist: Boolean,
+    ): MusicRepository.CascadeRemovalSummary {
+        // Shared mixes (spec §5): at the top, before the early returns below. The job waits 30 s.
+        if (sharedMixDao.forPlaylist(fromPlaylistId)?.role == com.stash.core.data.db.entity.SharedMixEntity.ROLE_OWNER) {
+            com.stash.core.data.share.SharedMixPublishWorker.enqueue(context, delaySeconds = 30)
+        }
+        // v0.9.15: explicit-block override. If the user ticked "Block this
+        // track" on the delete dialog, that intent always wins — we tear
+        // down the file + every cross-ref + insert the blocklist entry,
+        // even if the track is in Liked Songs or another playlist. The old
+        // protection logic was a safety net for *delete-without-block*; an
+        // explicit block should never silently no-op.
+        if (alsoBlacklist) {
+            val track = trackDao.getById(trackId) ?: return MusicRepository.CascadeRemovalSummary(
+                deleted = 0, keptProtected = 0, keptElsewhere = 0, blacklisted = 0,
+            )
+            blocklistGuard.block(track, com.stash.core.data.blocklist.BlockSource.PLAYLIST_DELETE)
+            _trackDeletions.emit(trackId)
+            return MusicRepository.CascadeRemovalSummary(
+                deleted = 1, keptProtected = 0, keptElsewhere = 0, blacklisted = 1,
+            )
+        }
+
+        // Step 1: always detach from the target playlist.
+        playlistDao.removeTrackFromPlaylist(fromPlaylistId, trackId)
+
+        // Step 2: protected-playlist escape hatch. Liked Songs and in-app
+        // custom playlists count as user-curated data — we refuse to let a
+        // cascade from elsewhere destroy them.
+        if (trackDao.isTrackInProtectedPlaylist(trackId)) {
+            return MusicRepository.CascadeRemovalSummary(
+                deleted = 0,
+                keptProtected = 1,
+                keptElsewhere = 0,
+                blacklisted = 0,
+            )
+        }
+
+        // Step 3: another non-protected playlist still claims it. Keep.
+        val otherClaims = trackDao.countOtherPlaylistsClaimingTrack(
+            trackId = trackId,
+            excludePlaylistId = fromPlaylistId,
+        )
+        if (otherClaims > 0) {
+            return MusicRepository.CascadeRemovalSummary(
+                deleted = 0,
+                keptProtected = 0,
+                keptElsewhere = 1,
+                blacklisted = 0,
+            )
+        }
+
+        // Step 4: nothing else claims the track. Hard delete the row + file.
+        val track = trackDao.getById(trackId) ?: return MusicRepository.CascadeRemovalSummary(
+            deleted = 0, keptProtected = 0, keptElsewhere = 0, blacklisted = 0,
+        )
+        track.filePath?.let { deleteTrackAudio(trackId, it) }
+        track.albumArtPath?.let { deleteTrackFile(it) }
+        trackDao.delete(track)
+        _trackDeletions.emit(trackId)
+        return MusicRepository.CascadeRemovalSummary(
+            deleted = 1, keptProtected = 0, keptElsewhere = 0, blacklisted = 0,
+        )
+    }
+
+    override suspend fun deletePlaylistWithCascade(
+        playlistId: Long,
+        alsoBlacklist: Boolean,
+    ): MusicRepository.CascadeRemovalSummary {
+        // Snapshot the track list BEFORE any mutation — iterating a live
+        // Flow while deleting would race with cascades.
+        val trackIds = playlistDao.getPlaylistWithTracks(playlistId)?.tracks
+            ?.map { it.id }
+            ?: emptyList()
+        // Its downloads that haven't started go now, as in removePlaylist (#532). Before
+        // the loop, which unlinks each song: a song kept by another playlist keeps its row.
+        // Switched off first, under the switch's lock: a sync's sweep (queueKeptPlaylists)
+        // reads the switch again inside that lock, so during the loop it can't queue the
+        // songs not unlinked yet, which would outlive the playlist.
+        KEEP_OFFLINE_LOCK.withLock {
+            if (downloadsItsSongs(playlistId)) {
+                playlistDao.setKeepOffline(playlistId, false)
+                downloadQueueDao.cancelWaitingForPlaylist(playlistId)
+            }
+        }
+
+        var deleted = 0
+        var keptProtected = 0
+        var keptElsewhere = 0
+        var blacklisted = 0
+
+        for (id in trackIds) {
+            // The playlist is deleted below, so skip the per-track recount.
+            val result = removeAndMaybeDelete(
+                trackId = id,
+                fromPlaylistId = playlistId,
+                alsoBlacklist = alsoBlacklist,
+            )
+            deleted += result.deleted
+            keptProtected += result.keptProtected
+            keptElsewhere += result.keptElsewhere
+            blacklisted += result.blacklisted
+        }
+
+        // Finally remove the playlist itself. playlist_tracks rows for it
+        // have already been handled per-track above; this just clears the
+        // container row. Uses the existing remove path for consistency.
+        playlistDao.getById(playlistId)?.let {
+            takeDownSharedLinkIfOwned(playlistId)
+            playlistDao.delete(it)
+        }
+
+        return MusicRepository.CascadeRemovalSummary(
+            deleted = deleted,
+            keptProtected = keptProtected,
+            keptElsewhere = keptElsewhere,
+            blacklisted = blacklisted,
+        )
+    }
+
+    override suspend fun isTrackProtectedExcluding(
+        trackId: Long,
+        excludePlaylistId: Long,
+    ): Boolean = trackDao.isTrackInProtectedPlaylistExcluding(trackId, excludePlaylistId)
+
+    override suspend fun blacklistTrack(trackId: Long) {
+        // v0.9.15: Delegate to BlocklistGuard for the atomic transaction
+        // (insert blocklist row + delete playlist_tracks + delete queue
+        // rows + delete tracks row + delete files). Identity-keyed so a
+        // re-like on a different source can't resurrect the track.
+        val track = trackDao.getById(trackId) ?: return
+        blocklistGuard.block(track, com.stash.core.data.blocklist.BlockSource.OTHER)
+        _trackDeletions.emit(trackId)
+    }
+
+    override suspend fun unblacklistTrack(trackId: Long) {
+        // v0.9.15: After Phase 3 ships, the tracks row is gone for blocked
+        // identities so this getById returns null. Settings UI should call
+        // BlocklistGuard.unblock(canonicalKey) directly going forward; this
+        // method exists only for backward-compat with any pre-rebind caller.
+        val track = trackDao.getById(trackId) ?: return
+        val key = com.stash.core.data.blocklist.BlocklistKey.of(
+            artist = track.artist, title = track.title, matcher = trackMatcher,
+        )
+        blocklistGuard.unblock(key)
+    }
+
+    // ── Streaming engine ────────────────────────────────────────────────
+
+    override suspend fun applyStreamingMode(enabled: Boolean) {
+        // v0.9.30 Path A: Library is downloaded-only regardless of toggle.
+        // The pref only gates search-tap streaming behaviour, so the
+        // orchestrator collapses to a single pref write.
+        streamingPreference.setEnabled(enabled)
+    }
+
+    // ── Sync history ────────────────────────────────────────────────────
+
+    override suspend fun getLatestSync(): SyncHistoryEntity? =
+        syncHistoryDao.getLatest()
+
+    override fun observeLatestSync(): Flow<SyncHistoryEntity?> =
+        syncHistoryDao.observeLatest()
+
+    override fun getAllSyncHistory(): Flow<List<SyncHistoryEntity>> =
+        syncHistoryDao.observeAll()
+
+    // ── Download queue cleanup ────────────────────────────────────────────
+
+    override suspend fun cancelPendingDownloadsForSource(source: String): Int {
+        val cancelled = downloadQueueDao.cancelDownloadsForSource(source)
+        if (cancelled > 0) {
+            android.util.Log.i("StashMigrations", "Cancelled $cancelled pending downloads for disconnected source: $source")
+        }
+        return cancelled
+    }
+
+    // ── Cleanup ──────────────────────────────────────────────────────────
+
+    override suspend fun cleanOrphanedMixTracks(): Int {
+        // ACCUMULATE = never auto-delete. While any source accumulates, the
+        // library is append-only — a deselected playlist, a rotated mix, or a
+        // disconnected source must not delete a downloaded track or its files.
+        // This single gate covers BOTH callers (DiffWorker per-sync + the startup
+        // sweep). See SyncMode / the refresh-accumulate design.
+        if (syncPreferencesManager.anyAccumulate()) {
+            android.util.Log.d("StashCleanup", "Skipped orphan sweep — accumulate mode active")
+            return 0
+        }
+        // Re-evaluate the orphan predicate (membership + active-discovery
+        // exclusion) and delete the rows in ONE transaction, so a track
+        // re-linked by DiffWorker / the mix materializer in the gap can't be
+        // raced and lose its fresh cross-ref + irrecoverable FLAC. Files are
+        // removed only AFTER their rows are gone (a crash mid-file-delete
+        // leaves a harmless orphaned file, never a row pointing at nothing).
+        val deleted = trackDao.deleteOrphanedDownloadedTracks()
+        if (deleted.isEmpty()) return 0
+
+        for (track in deleted) {
+            // Delete the audio file from disk (SAF-aware — see deleteTrackFile),
+            // unless a song that is not an orphan still plays from it.
+            track.filePath?.let { deleteTrackAudio(track.id, it) }
+            // Delete locally-stored album art if present.
+            track.albumArtPath?.let { deleteTrackFile(it) }
+            _trackDeletions.emit(track.id)
+        }
+
+        android.util.Log.i(
+            "StashCleanup",
+            "Cleaned ${deleted.size} orphaned track(s) and their audio files",
+        )
+        return deleted.size
+    }
+
+    // ── Art URL migration ──────────────────────────────────────────────
+
+    /**
+     * Upgrades low-resolution album art URLs for all existing tracks.
+     * YouTube Music InnerTube responses originally returned 60x60 thumbnails;
+     * this replaces them with 544x544. Spotify 300px URLs are upgraded to 640px.
+     * Already-upgraded URLs pass through [ArtUrlUpgrader.upgrade] unchanged,
+     * so this is safe to run on every startup.
+     */
+    /**
+     * Fixes accumulated duplicate entries in playlist_tracks. Before the
+     * DiffWorker fix, every sync run inserted new tracks without clearing
+     * old ones, causing multiple tracks per position. This query deletes
+     * all entries where duplicate positions exist within a playlist, keeping
+     * only the one with the latest added_at timestamp.
+     */
+    private suspend fun deduplicatePlaylistTracks() {
+        // Strategy: for each playlist that has duplicate positions, clear
+        // ALL entries and let the next sync rebuild them cleanly. This is
+        // aggressive but correct — the tracks themselves are not deleted,
+        // only the playlist membership. The next sync will re-associate them.
+        val allPlaylists = playlistDao.getAllActive().first()
+        var cleaned = 0
+        for (playlist in allPlaylists) {
+            // Count entries vs expected track count
+            // v0.9.27 — downloaded-only is correct: this is a duplicate-detection
+            // migration that compares the persisted track_count against actual
+            // rows, both of which historically counted downloaded entries only.
+            val tracks = trackDao.getByPlaylist(playlist.id, includeStreamable = false).first()
+            if (tracks.size > playlist.trackCount && playlist.trackCount > 0) {
+                playlistDao.clearPlaylistTracks(playlist.id)
+                cleaned++
+                android.util.Log.i("StashMigrations",
+                    "Cleared ${tracks.size} stale entries for '${playlist.name}' (expected ${playlist.trackCount})")
+            }
+        }
+        if (cleaned > 0) {
+            android.util.Log.i("StashMigrations", "Cleaned $cleaned playlists with duplicate track entries. Next sync will rebuild.")
+        }
+    }
+
+    companion object {
+        private const val DOWNLOADS_MIX_SOURCE_ID = "stash_downloads_mix"
+
+        /** Serializes [startDiscoveryDrain]'s read-then-enqueue, across every instance. */
+        private val DRAIN_START_LOCK = Mutex()
+
+        /**
+         * One Download switch change at a time, across every instance: queueing a
+         * kept playlist ([insertKeptPlaylist]) and the switch's off never interleave.
+         */
+        private val KEEP_OFFLINE_LOCK = Mutex()
+
+        /**
+         * WorkManager unique-work names for the Stash Mix workers. Used by
+         * [applyStashMixesEnabled], and by the app's cold start, to cancel them
+         * all in one shot when the user opts out. Names mirror the `WORK_NAME` /
+         * `UNIQUE_WORK_NAME` constants inside each worker — kept in sync by code
+         * review.
+         */
+        val STASH_MIX_WORK_NAMES = listOf(
+            "stash_mix_refresh",
+            "stash_discovery",
+            "stash_tag_enrichment",
+            "stash_track_info_enrichment",
+            // Not "discovery_download": every row it drains is a download the user asked for
+            // (#474), which its query enforces since #532.
+        )
+    }
+}

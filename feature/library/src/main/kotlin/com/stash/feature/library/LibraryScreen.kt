@@ -1,0 +1,2229 @@
+package com.stash.feature.library
+
+import android.net.Uri
+import kotlin.math.absoluteValue
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material3.IconButton
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Album
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.DownloadDone
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.HighQuality
+import androidx.compose.material.icons.filled.ImageNotSupported
+import androidx.compose.material.icons.filled.RemoveCircleOutline
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PlaylistAdd
+import androidx.compose.material.icons.filled.PlaylistAddCheck
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.PlaylistPlay
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.PushPin
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil3.compose.AsyncImage
+import coil3.compose.AsyncImagePainter
+import coil3.compose.rememberAsyncImagePainter
+import com.stash.core.model.Playlist
+import com.stash.core.model.PlaylistType
+import com.stash.core.model.Track
+import com.stash.core.ui.components.GlassCard
+import com.stash.core.ui.components.SourceIndicator
+import com.stash.core.ui.components.TrackListItem
+import com.stash.core.ui.components.VerticalScrollbar
+import com.stash.core.ui.selection.SelectionAction
+import com.stash.core.ui.selection.SelectionScaffoldOverlay
+import com.stash.core.ui.selection.SelectionState
+import com.stash.core.ui.theme.StashTheme
+import com.stash.core.common.extensions.pluralize
+
+/**
+ * Library screen entry point. Injects the [LibraryViewModel] via Hilt
+ * and delegates rendering to the stateless [LibraryContent] composable.
+ *
+ * Multi-select applies to the Tracks and Liked tabs. The [selection]
+ * state is hoisted here so the contextual chrome ([SelectionScaffoldOverlay])
+ * and the batch Save/Delete surfaces can sit in this screen's root Box. The
+ * selection is cleared whenever the active tab changes so it can never strand
+ * across tabs (or hide the nav bar while a non-selectable tab is showing).
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun LibraryScreen(
+    modifier: Modifier = Modifier,
+    onNavigateToPlaylist: (Long) -> Unit = {},
+    onNavigateToArtist: (String) -> Unit = {},
+    onNavigateToAlbum: (albumId: String, name: String, artUrl: String?, artistName: String) -> Unit = { _, _, _, _ -> },
+    onNavigateToRemoteAlbum: (albumId: String, name: String, artUrl: String?, artistName: String) -> Unit = { _, _, _, _ -> },
+    onSelectionModeChanged: (Boolean) -> Unit = {},
+    viewModel: LibraryViewModel = hiltViewModel(),
+) {
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    // Bound to the search field directly. NOT state.searchQuery — that value
+    // round-trips through the off-Main filter pipeline and arrives too late to
+    // render the keystroke, which made typing drop characters (see
+    // LibraryViewModel.searchQuery).
+    val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
+    val importState by viewModel.localImportState.collectAsStateWithLifecycle()
+    val userPlaylists by viewModel.userPlaylists.collectAsStateWithLifecycle(initialValue = emptyList())
+    val likedTracks by viewModel.likedTracks.collectAsStateWithLifecycle()
+    val likedFilter by viewModel.likedFilter.collectAsStateWithLifecycle()
+    val likedSources by viewModel.likedSources.collectAsStateWithLifecycle()
+
+    // Home's Liked card queued a focus before the tab switch: land on Liked.
+    // The tab is ALSO handed to the content pager — on a cold restore the
+    // pager re-emits its SAVED page through the settled-page push-back and
+    // would clobber this selectTab (device-reproduced); the pager must be
+    // scrolled explicitly, not just the ViewModel state.
+    var deepLinkFocusTab by remember { mutableStateOf<LibraryTab?>(null) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        if (viewModel.consumeDeepLinkFocus() == com.stash.core.data.navigation.LibraryFocus.LIKED) {
+            deepLinkFocusTab = LibraryTab.LIKED
+            viewModel.selectTab(LibraryTab.LIKED)
+        }
+    }
+
+    // Multi-select state — Tracks and Liked tabs. `isActive` signals out so the
+    // host can hide the mini-player (Task 7), and the selection is force-cleared
+    // on every tab change so it can't leak onto Playlists/Artists/Albums.
+    val selection = com.stash.core.ui.selection.rememberSelectionState()
+    androidx.compose.runtime.LaunchedEffect(selection.isActive) { onSelectionModeChanged(selection.isActive) }
+    androidx.compose.runtime.LaunchedEffect(state.activeTab) { selection.clear() }
+    androidx.activity.compose.BackHandler(enabled = selection.isActive) { selection.clear() }
+
+    // Batch-flow flags for the Save / Delete / FLAC-upgrade surfaces.
+    var showBatchSave by remember { mutableStateOf(false) }
+    var showBatchDelete by remember { mutableStateOf(false) }
+    var showFlacConfirm by remember { mutableStateOf(false) }
+
+    // Snackbar for the batch roll-up summaries.
+    val snackbarHostState = remember { androidx.compose.material3.SnackbarHostState() }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        viewModel.userMessages.collect { snackbarHostState.showSnackbar(it) }
+    }
+
+    LaunchedEffect(Unit) {
+        viewModel.albumNavEvents.collect { a ->
+            onNavigateToRemoteAlbum(a.albumId, a.name, a.artUrl, a.artistName)
+        }
+    }
+    
+
+    val followedPlaylistIds by viewModel.followedPlaylistIds.collectAsStateWithLifecycle()
+    Box(modifier = modifier.fillMaxSize()) {
+        LibraryContent(
+            state = state,
+            searchQuery = searchQuery,
+            importState = importState,
+            onShuffleLibrary = viewModel::shuffleLibrary,
+            onShuffleLiked = viewModel::shuffleLiked,
+            onTabSelected = viewModel::selectTab,
+            onSearchQueryChanged = viewModel::setSearchQuery,
+            onSortOrderChanged = viewModel::setSortOrder,
+            onSourceFilterChanged = viewModel::setSourceFilter,
+            onTrackClick = { track -> viewModel.playTrack(track, state.tracks) },
+            onPlayNext = viewModel::playNext,
+            onAddToQueue = viewModel::addToQueue,
+            onDeleteTrack = viewModel::deleteTrack,
+            onPlayPlaylist = { playlist -> onNavigateToPlaylist(playlist.id) },
+            onAddPlaylistToQueue = viewModel::addPlaylistToQueue,
+            onRemovePlaylist = viewModel::removePlaylist,
+            onDeletePlaylist = viewModel::deletePlaylist,
+            followedPlaylistIds = followedPlaylistIds,
+            onUnfollowPlaylist = viewModel::unfollowPlaylist,
+            onSetPlaylistImage = viewModel::setPlaylistImage,
+            onRemovePlaylistImage = viewModel::removePlaylistImage,
+            onTogglePlaylistPinned = viewModel::togglePlaylistPinned,
+            onTogglePlaylistOnHome = viewModel::togglePlaylistOnHome,
+            onPlayArtist = onNavigateToArtist,
+            onViewAlbum = viewModel::onViewAlbumTapped,
+            onAddArtistToQueue = viewModel::addArtistToQueue,
+            onDeleteArtist = viewModel::deleteArtist,
+            onPlayAlbum = viewModel::playAlbum,
+            onAddAlbumToQueue = viewModel::addAlbumToQueue,
+            onOpenAlbum = { album ->
+                onNavigateToAlbum(album.name, album.name, album.artUrl, album.artist)
+            },
+            onStartImport = viewModel::startLocalImport,
+            onCancelImport = viewModel::cancelLocalImport,
+            onDismissImport = viewModel::dismissLocalImport,
+            selection = selection,
+            // Single-track sheet actions reuse the batch VM methods with
+            // one-element lists — no separate single-track VM surface.
+            userPlaylists = userPlaylists.map { com.stash.core.ui.components.PlaylistInfo(it.id, it.name, it.trackCount) },
+            onSaveToPlaylist = { trackId, playlistId -> viewModel.saveSelectedToPlaylist(listOf(trackId), playlistId) },
+            onCreatePlaylistWithTrack = { name, trackId -> viewModel.createPlaylistAndAddTracks(name, listOf(trackId)) },
+            onDownloadTrack = { viewModel.downloadSelected(listOf(it)) },
+            onRemoveDownloadTrack = { viewModel.removeDownloadsForSelected(listOf(it)) },
+            likedTracks = likedTracks,
+            likedFilter = likedFilter,
+            likedSources = likedSources,
+            onSelectLikedSource = viewModel::setLikedFilter,
+            onPlayLikedTrack = viewModel::playLiked,
+            deepLinkFocusTab = deepLinkFocusTab,
+        )
+
+        // ── Selection chrome — meaningful on the Tracks and Liked tabs. Selection
+        // can only be entered from a TrackListItem (those tabs' rows), and we clear
+        // on tab change, so guarding the overlay on activeTab is belt-and-braces.
+        val activeSelectableTracks =
+            if (state.activeTab == LibraryTab.LIKED) likedTracks else state.tracks
+        val selectedTracks = activeSelectableTracks.filter { it.id in selection.selectedIds }
+        val selectedIds = selection.selectedIds.toList()
+        val allDownloaded = selectedTracks.isNotEmpty() && selectedTracks.all { it.isDownloaded }
+
+        // In a Listen Together session "Add to queue" hides; Play next says what it does there (as in TrackOptionsSheet).
+        val listenRole = com.stash.core.ui.components.LocalListenTogetherRole.current
+        val selectionActions = listOfNotNull(
+            SelectionAction("add_queue", "Add to queue", Icons.Default.PlaylistAdd) {
+                viewModel.addSelectedToQueue(selectedTracks); selection.clear()
+            }.takeIf { listenRole == com.stash.core.ui.components.ListenTogetherRole.NONE },
+            SelectionAction("add_playlist", "Add to playlist", Icons.Default.PlaylistAddCheck) {
+                showBatchSave = true
+            },
+            if (allDownloaded) {
+                SelectionAction("remove_download", "Remove download", Icons.Default.DownloadDone) {
+                    viewModel.removeDownloadsForSelected(selectedIds); selection.clear()
+                }
+            } else {
+                SelectionAction("download", "Download", Icons.Default.Download) {
+                    viewModel.downloadSelected(selectedIds); selection.clear()
+                }
+            },
+            SelectionAction("delete", "Delete", Icons.Default.Delete) {
+                showBatchDelete = true
+            },
+            SelectionAction("play_next", com.stash.core.ui.components.playNextLabel(listenRole, "Play next"), Icons.Default.PlaylistPlay) {
+                viewModel.playSelectedNext(selectedTracks); selection.clear()
+            },
+            // Lands in the selection bar's More overflow (6 > 4) — by design.
+            SelectionAction("upgrade_flac", "Upgrade to FLAC", Icons.Default.HighQuality) {
+                showFlacConfirm = true
+            },
+        )
+
+        if (state.activeTab == LibraryTab.TRACKS || state.activeTab == LibraryTab.LIKED) {
+            SelectionScaffoldOverlay(
+                selection = selection,
+                allIds = activeSelectableTracks.map { it.id },
+                actions = selectionActions,
+            )
+        }
+
+        androidx.compose.material3.SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(bottom = 16.dp),
+        ) { data -> androidx.compose.material3.Snackbar(snackbarData = data) }
+    }
+
+    // ── Batch Save to Playlist sheet (its own ModalBottomSheet) ────────────
+    if (showBatchSave) {
+        val batchIds = selection.selectedIds.toList()
+        com.stash.core.ui.components.SaveToPlaylistSheet(
+            playlists = userPlaylists.map {
+                com.stash.core.ui.components.PlaylistInfo(it.id, it.name, it.trackCount)
+            },
+            onSaveToPlaylist = { playlistId ->
+                viewModel.saveSelectedToPlaylist(batchIds, playlistId)
+                showBatchSave = false
+                selection.clear()
+            },
+            onCreatePlaylist = { name ->
+                viewModel.createPlaylistAndAddTracks(name, batchIds)
+                showBatchSave = false
+                selection.clear()
+            },
+            onDismiss = { showBatchSave = false },
+        )
+    }
+
+    // ── Batch delete confirmation dialog ──────────────────────────────────
+    // Mirrors the single-track Library delete dialog (same "also block" toggle
+    // and "Delete & Block" wording), pluralised across the current selection.
+    if (showBatchDelete) {
+        // Source from the active tab's list — state.tracks is downloaded-only,
+        // so a Liked-tab selection holding undownloaded likes would under-count
+        // and silently skip those rows if sourced from it.
+        val batchTracks = (if (state.activeTab == LibraryTab.LIKED) likedTracks else state.tracks)
+            .filter { it.id in selection.selectedIds }
+        val n = batchTracks.size
+        var alsoBlacklist by remember(showBatchDelete) { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = { showBatchDelete = false },
+            title = { Text("Delete $n song${if (n != 1) "s" else ""}?") },
+            text = {
+                Column {
+                    Text(
+                        "${n} song${if (n != 1) "s" else ""} will be removed from your " +
+                            "library and deleted from disk.",
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.clickable { alsoBlacklist = !alsoBlacklist },
+                    ) {
+                        androidx.compose.material3.Checkbox(
+                            checked = alsoBlacklist,
+                            onCheckedChange = { alsoBlacklist = it },
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Also block these songs from future syncs",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            Text(
+                                text = "Blocked songs never re-download. Unblock them in Settings later.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.deleteSelected(batchTracks, alsoBlacklist)
+                        showBatchDelete = false
+                        selection.clear()
+                    },
+                ) {
+                    Text(
+                        text = if (alsoBlacklist) "Delete & Block" else "Delete",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBatchDelete = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    // ── Upgrade-to-FLAC confirmation dialog (spec §3) ─────────────────────
+    // Pre-flight honesty: eligible count, duration-based size estimate, and
+    // a free-space heads-up. Warning only — never hard-blocks the confirm.
+    if (showFlacConfirm) {
+        val batchTracks = (if (state.activeTab == LibraryTab.LIKED) likedTracks else state.tracks)
+            .filter { it.id in selection.selectedIds }
+        val eligible = eligibleForFlacUpgrade(batchTracks)
+        val skipped = batchTracks.size - eligible.size
+        val bytes = estimateFlacBytes(eligible)
+        val context = androidx.compose.ui.platform.LocalContext.current
+        val freeBytes = remember {
+            runCatching {
+                android.os.StatFs(context.filesDir.path).availableBytes
+            }.getOrDefault(Long.MAX_VALUE)
+        }
+        AlertDialog(
+            onDismissRequest = { showFlacConfirm = false },
+            title = { Text("Upgrade to FLAC?") },
+            text = {
+                Column {
+                    Text(
+                        "Upgrade ${eligible.size} ${if (eligible.size == 1) "track" else "tracks"} to FLAC? " +
+                            "Roughly ~${formatGb(bytes)} of downloads. Originals are replaced." +
+                            if (skipped > 0) {
+                                "\n\n$skipped already-FLAC or not-downloaded " +
+                                    "${if (skipped == 1) "track" else "tracks"} will be skipped."
+                            } else {
+                                ""
+                            },
+                    )
+                    if (bytes > freeBytes * 8 / 10) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "Heads up: that's close to (or beyond) your free space " +
+                                "(${formatGb(freeBytes)} available).",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = eligible.isNotEmpty(),
+                    onClick = {
+                        viewModel.upgradeSelectedToFlac(eligible.map { it.id })
+                        showFlacConfirm = false
+                        selection.clear()
+                    },
+                ) { Text("Upgrade") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showFlacConfirm = false }) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+// ── Stateless content composable ─────────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LibraryContent(
+    state: LibraryUiState,
+    /** Field-facing query — updates this frame; see LibraryViewModel.searchQuery. */
+    searchQuery: String,
+    importState: com.stash.data.download.files.LocalImportState,
+    onShuffleLibrary: () -> Unit,
+    onShuffleLiked: () -> Unit,
+    onTabSelected: (LibraryTab) -> Unit,
+    onSearchQueryChanged: (String) -> Unit,
+    onSortOrderChanged: (SortOrder) -> Unit,
+    onSourceFilterChanged: (SourceFilter) -> Unit,
+    onTrackClick: (Track) -> Unit,
+    onPlayNext: (Track) -> Unit,
+    onAddToQueue: (Track) -> Unit,
+    onDeleteTrack: (Track, Boolean) -> Unit,
+    onPlayPlaylist: (Playlist) -> Unit,
+    onAddPlaylistToQueue: (Playlist) -> Unit,
+    onRemovePlaylist: (Playlist) -> Unit,
+    onDeletePlaylist: (Playlist, Boolean) -> Unit,
+    followedPlaylistIds: Set<Long> = emptySet(),
+    onUnfollowPlaylist: (Playlist) -> Unit = {},
+    onSetPlaylistImage: (Long, Uri) -> Unit,
+    onRemovePlaylistImage: (Long) -> Unit,
+    onTogglePlaylistPinned: (Playlist) -> Unit,
+    onTogglePlaylistOnHome: (Playlist) -> Unit,
+    onViewAlbum: (Track) -> Unit,
+    onPlayArtist: (String) -> Unit,
+    onAddArtistToQueue: (String) -> Unit,
+    onDeleteArtist: (String) -> Unit,
+    onPlayAlbum: (String, String) -> Unit,
+    onAddAlbumToQueue: (String, String) -> Unit,
+    onOpenAlbum: (AlbumInfo) -> Unit,
+    onStartImport: (List<Uri>) -> Unit,
+    onCancelImport: () -> Unit,
+    onDismissImport: () -> Unit,
+    selection: SelectionState,
+    userPlaylists: List<com.stash.core.ui.components.PlaylistInfo>,
+    onSaveToPlaylist: (trackId: Long, playlistId: Long) -> Unit,
+    onCreatePlaylistWithTrack: (name: String, trackId: Long) -> Unit,
+    onDownloadTrack: (Long) -> Unit,
+    onRemoveDownloadTrack: (Long) -> Unit,
+    likedTracks: List<Track>,
+    likedFilter: LikedFilter,
+    likedSources: Set<LikedFilter>,
+    onSelectLikedSource: (LikedFilter) -> Unit,
+    onPlayLikedTrack: (Track) -> Unit,
+    deepLinkFocusTab: LibraryTab? = null,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(top = 16.dp),
+    ) {
+        // -- Heading + Import action --
+        // SAF audio picker launched from the "Add tracks" icon button in
+        // the heading row. Returns a List<Uri> that we hand directly to
+        // the coordinator; no persistable permission needed because we
+        // copy the bytes immediately at import time.
+        val importPicker = androidx.activity.compose.rememberLauncherForActivityResult(
+            contract = androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments(),
+        ) { uris: List<Uri>? ->
+            if (!uris.isNullOrEmpty()) onStartImport(uris)
+        }
+        var searchOpen by remember { mutableStateOf(false) }
+        var sortFilterOpen by remember { mutableStateOf(false) }
+
+        // Recent-downloads rail — the scrolling leading content of the Songs
+        // landing (scrolls away while the compact header + category chips stay
+        // pinned). The old purple shuffle hero is gone — it duplicated the
+        // header's shuffle action.
+        // Songs landing only — noise above the other grids. Handed ONLY to
+        // TracksTab: with the pager, neighbor pages compose mid-swipe, so
+        // gating on activeTab here would flash the rail onto other pages.
+        val libraryHeader: @Composable () -> Unit = {
+            Column {
+                if (state.recentlyAdded.isNotEmpty()) {
+                    RecentlyDownloadedRail(
+                        tracks = state.recentlyAdded.take(12),
+                        onTrackClick = onTrackClick,
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+            }
+        }
+
+        // Compact header: title + Import (+), search, and sort/filter icons —
+        // replaces the old heading row + the six stacked control bars.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 20.dp, end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Library",
+                style = MaterialTheme.typography.headlineLarge,
+                color = MaterialTheme.colorScheme.onBackground,
+                modifier = Modifier.weight(1f),
+            )
+            // Shuffle stays in the always-visible header so it's reachable even
+            // once the hero has scrolled away. It shuffles what you're looking
+            // at: the liked list on the Liked tab (issue #402 — it used to
+            // shuffle the whole library there), the whole library elsewhere.
+            val likedTabActive = state.activeTab == LibraryTab.LIKED
+            IconButton(onClick = if (likedTabActive) onShuffleLiked else onShuffleLibrary) {
+                Icon(
+                    Icons.Filled.Shuffle,
+                    contentDescription = if (likedTabActive) "Shuffle liked songs" else "Shuffle library",
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
+            IconButton(onClick = { importPicker.launch(arrayOf("audio/*")) }) {
+                Icon(Icons.Filled.Add, contentDescription = "Import tracks")
+            }
+            IconButton(onClick = { searchOpen = !searchOpen }) {
+                Icon(Icons.Filled.Search, contentDescription = "Search library")
+            }
+            IconButton(onClick = { sortFilterOpen = true }) {
+                Icon(Icons.Filled.Tune, contentDescription = "Sort and filter")
+            }
+        }
+
+        // -- Import progress strip (only when Running / Done / Error) --
+        LocalImportStrip(
+            state = importState,
+            onCancel = onCancelImport,
+            onDismiss = onDismissImport,
+        )
+
+        // -- Inline search (toggled by the header 🔍) — no permanent bar --
+        if (searchOpen) {
+            GlassSearchBar(
+                query = searchQuery,
+                onQueryChange = onSearchQueryChanged,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+            )
+        }
+
+        // -- Category chips (pinned): Songs / Playlists / Artists / Albums --
+        val chipTabs = listOf(
+            "Songs" to LibraryTab.TRACKS,
+            "Liked" to LibraryTab.LIKED,
+            "Playlists" to LibraryTab.PLAYLISTS,
+            "Artists" to LibraryTab.ARTISTS,
+            "Albums" to LibraryTab.ALBUMS,
+        )
+        com.stash.core.ui.components.CrispChipRow(
+            chips = chipTabs.map { it.first },
+            selected = chipTabs.first { it.second == state.activeTab }.first,
+            onSelect = { label -> onTabSelected(chipTabs.first { it.first == label }.second) },
+            modifier = Modifier.padding(vertical = 4.dp),
+        )
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        // -- Sort & filter sheet (toggled by the header ⇅) --
+        if (sortFilterOpen) {
+            LibrarySortFilterSheet(
+                sortOrder = state.sortOrder,
+                sourceFilter = state.sourceFilter,
+                showDuration = state.activeTab == LibraryTab.TRACKS,
+                onSortSelected = onSortOrderChanged,
+                onFilterSelected = onSourceFilterChanged,
+                onDismiss = { sortFilterOpen = false },
+            )
+        }
+
+        // -- Content area --
+        val anyServiceConnected = state.spotifyConnected || state.youTubeConnected
+        if (state.isLoading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .weight(1f),
+                contentAlignment = Alignment.Center,
+            ) {
+                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+            }
+        } else {
+            // Swiping left/right moves between the category pages too — the
+            // pager and the chip row drive the same activeTab state: a chip
+            // tap animates the pager here; a settled swipe pushes the tab
+            // back to the ViewModel (both sync no-ops when already aligned).
+            val pagerState = rememberPagerState(
+                initialPage = chipTabs.indexOfFirst { it.second == state.activeTab }.coerceAtLeast(0),
+            ) { chipTabs.size }
+            LaunchedEffect(state.activeTab) {
+                val idx = chipTabs.indexOfFirst { it.second == state.activeTab }
+                if (idx >= 0 && idx != pagerState.currentPage) pagerState.animateScrollToPage(idx)
+            }
+            LaunchedEffect(pagerState) {
+                snapshotFlow { pagerState.settledPage }.collect { page ->
+                    onTabSelected(chipTabs[page].second)
+                }
+            }
+            // Deep link (Home's Liked card) must beat the restored pager
+            // page: on a cold restore the push-back above re-emits the SAVED
+            // page and overwrites the deep-link's selectTab. Scrolling the
+            // pager directly is deterministic — the settled emission then
+            // pushes the same tab back, self-consistently.
+            LaunchedEffect(deepLinkFocusTab) {
+                val idx = chipTabs.indexOfFirst { it.second == deepLinkFocusTab }
+                if (idx >= 0) pagerState.scrollToPage(idx)
+            }
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize(),
+            ) { page ->
+                when (chipTabs[page].second) {
+                    LibraryTab.PLAYLISTS -> PlaylistsGrid(
+                        playlists = state.playlists,
+                        anyServiceConnected = anyServiceConnected,
+                        onPlayPlaylist = onPlayPlaylist,
+                        onAddPlaylistToQueue = onAddPlaylistToQueue,
+                        onRemovePlaylist = onRemovePlaylist,
+                        onDeletePlaylist = onDeletePlaylist,
+                        followedPlaylistIds = followedPlaylistIds,
+                        onUnfollowPlaylist = onUnfollowPlaylist,
+                        onSetPlaylistImage = onSetPlaylistImage,
+                        onRemovePlaylistImage = onRemovePlaylistImage,
+                        onTogglePlaylistPinned = onTogglePlaylistPinned,
+                        onTogglePlaylistOnHome = onTogglePlaylistOnHome,
+                        header = {},
+                    )
+                    LibraryTab.TRACKS -> TracksTab(
+                        tracks = state.tracks,
+                        currentlyPlayingTrackId = state.currentlyPlayingTrackId,
+                        onTrackClick = onTrackClick,
+                        onPlayNext = onPlayNext,
+                        onAddToQueue = onAddToQueue,
+                        onDeleteTrack = onDeleteTrack,
+                        onViewAlbum = onViewAlbum,
+                        anyServiceConnected = anyServiceConnected,
+                        selection = selection,
+                        userPlaylists = userPlaylists,
+                        onSaveToPlaylist = onSaveToPlaylist,
+                        onCreatePlaylistWithTrack = onCreatePlaylistWithTrack,
+                        onDownloadTrack = onDownloadTrack,
+                        onRemoveDownloadTrack = onRemoveDownloadTrack,
+                        header = libraryHeader,
+                    )
+                    LibraryTab.LIKED -> LikedTab(
+                        tracks = likedTracks,
+                        filter = likedFilter,
+                        sources = likedSources,
+                        currentlyPlayingTrackId = state.currentlyPlayingTrackId,
+                        onSelectSource = onSelectLikedSource,
+                        onTrackClick = onPlayLikedTrack,
+                        onPlayNext = onPlayNext,
+                        onAddToQueue = onAddToQueue,
+                        onDeleteTrack = onDeleteTrack,
+                        selection = selection,
+                        userPlaylists = userPlaylists,
+                        onSaveToPlaylist = onSaveToPlaylist,
+                        onCreatePlaylistWithTrack = onCreatePlaylistWithTrack,
+                        onDownloadTrack = onDownloadTrack,
+                        onRemoveDownloadTrack = onRemoveDownloadTrack,
+                    )
+                    LibraryTab.ARTISTS -> ArtistsGrid(
+                        artists = state.artists,
+                        singleTrackArtists = state.singleTrackArtists,
+                        anyServiceConnected = anyServiceConnected,
+                        onPlayArtist = onPlayArtist,
+                        onAddArtistToQueue = onAddArtistToQueue,
+                        onDeleteArtist = onDeleteArtist,
+                        header = {},
+                    )
+                    LibraryTab.ALBUMS -> AlbumsGrid(
+                        albums = state.albums,
+                        singleTrackAlbums = state.singleTrackAlbums,
+                        anyServiceConnected = anyServiceConnected,
+                        onPlayAlbum = onPlayAlbum,
+                        onAddAlbumToQueue = onAddAlbumToQueue,
+                        onOpenAlbum = onOpenAlbum,
+                        header = {},
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ── Recently downloaded rail ─────────────────────────────────────────────────
+
+@Composable
+private fun RecentlyDownloadedRail(
+    tracks: List<Track>,
+    onTrackClick: (Track) -> Unit,
+) {
+    Column {
+        Text(
+            text = "RECENTLY DOWNLOADED",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.secondary,
+            modifier = Modifier.padding(start = 20.dp, top = 12.dp, bottom = 8.dp),
+        )
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            items(tracks, key = { it.id }) { track ->
+                com.stash.core.ui.components.AlbumSquareCard(
+                    title = track.title,
+                    artist = track.artist,
+                    thumbnailUrl = track.albumArtUrl,
+                    year = null,
+                    isLossless = track.fileFormat.equals("flac", ignoreCase = true),
+                    onClick = { onTrackClick(track) },
+                )
+            }
+        }
+    }
+}
+
+// ── Liked subcategory (browse + sift likes by origin) ───────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LikedTab(
+    tracks: List<Track>,
+    filter: LikedFilter,
+    sources: Set<LikedFilter>,
+    currentlyPlayingTrackId: Long?,
+    onSelectSource: (LikedFilter) -> Unit,
+    onTrackClick: (Track) -> Unit,
+    onPlayNext: (Track) -> Unit,
+    onAddToQueue: (Track) -> Unit,
+    onDeleteTrack: (Track, Boolean) -> Unit,
+    selection: SelectionState,
+    userPlaylists: List<com.stash.core.ui.components.PlaylistInfo>,
+    onSaveToPlaylist: (trackId: Long, playlistId: Long) -> Unit,
+    onCreatePlaylistWithTrack: (name: String, trackId: Long) -> Unit,
+    onDownloadTrack: (Long) -> Unit,
+    onRemoveDownloadTrack: (Long) -> Unit,
+) {
+    // Sift chips: "All" plus only the origins that actually have likes.
+    val sift = buildList {
+        add("All" to LikedFilter.ALL)
+        if (LikedFilter.STASH in sources) add("LUMA" to LikedFilter.STASH)
+        if (LikedFilter.SPOTIFY in sources) add("Spotify" to LikedFilter.SPOTIFY)
+        if (LikedFilter.YOUTUBE in sources) add("YouTube" to LikedFilter.YOUTUBE)
+    }
+
+    // Track selected for the context-menu bottom sheet (opened via the ⋮ now;
+    // long-press enters multi-select instead).
+    var selectedTrack by remember { mutableStateOf<Track?>(null) }
+    // Track whose share sheet is open (fork issue ParaliyzedEvo/Stash#40).
+    var trackToShare by remember { mutableStateOf<Track?>(null) }
+    trackToShare?.let { t ->
+        com.stash.core.ui.components.ShareTrackSheet(
+            track = t,
+            onDismiss = { trackToShare = null },
+        )
+    }
+    // Track whose Save-to-Playlist sheet is open (single-track path).
+    var trackToSave by remember { mutableStateOf<Track?>(null) }
+    // Track pending delete confirmation.
+    var trackToDelete by remember { mutableStateOf<Track?>(null) }
+
+    val listState = rememberLazyListState()
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(
+            state = listState,
+            contentPadding = PaddingValues(bottom = if (selection.isActive) 140.dp else 0.dp),
+        ) {
+            // Only offer the sift when there's more than one origin to pick between.
+            if (sift.size > 2) {
+                item {
+                    com.stash.core.ui.components.CrispChipRow(
+                        chips = sift.map { it.first },
+                        selected = sift.firstOrNull { it.second == filter }?.first ?: "All",
+                        onSelect = { label -> onSelectSource(sift.first { it.first == label }.second) },
+                        modifier = Modifier.padding(vertical = 4.dp),
+                    )
+                }
+            }
+            if (tracks.isEmpty()) {
+                item { EmptyTabMessage("No liked songs yet — tap the heart on a track to like it") }
+            }
+            items(tracks, key = { it.id }) { track ->
+                TrackListItem(
+                    track = track,
+                    onClick = {
+                        if (selection.isActive) selection.toggle(track.id)
+                        else onTrackClick(track)
+                    },
+                    isPlaying = track.id == currentlyPlayingTrackId,
+                    onLongPress = { if (!selection.isActive) selection.enter(track.id) },
+                    selectionActive = selection.isActive,
+                    selected = selection.isSelected(track.id),
+                    onMoreClick = { selectedTrack = track },
+                )
+            }
+        }
+        VerticalScrollbar(state = listState)
+    }
+
+    // ── Context-menu bottom sheet (shared component) ────────────────────
+    selectedTrack?.let { track ->
+        val sheetState = rememberModalBottomSheetState()
+        ModalBottomSheet(
+            onDismissRequest = { selectedTrack = null },
+            sheetState = sheetState,
+            containerColor = MaterialTheme.colorScheme.surface,
+        ) {
+            com.stash.core.ui.components.TrackOptionsSheet(
+                track = track,
+                onPlayNext = { onPlayNext(it); selectedTrack = null },
+                onAddToQueue = { onAddToQueue(it); selectedTrack = null },
+                onSaveToPlaylist = { trackToSave = it; selectedTrack = null },
+                onDismiss = { selectedTrack = null },
+                onShare = { trackToShare = it; selectedTrack = null },
+                onDownload = { onDownloadTrack(it.id); selectedTrack = null },
+                onRemoveDownload = { onRemoveDownloadTrack(it.id); selectedTrack = null },
+                onDelete = { trackToDelete = it; selectedTrack = null },
+            )
+        }
+    }
+
+    // ── Save to Playlist sheet (single-track) ───────────────────────────
+    trackToSave?.let { track ->
+        com.stash.core.ui.components.SaveToPlaylistSheet(
+            playlists = userPlaylists,
+            onSaveToPlaylist = { playlistId ->
+                onSaveToPlaylist(track.id, playlistId)
+                trackToSave = null
+            },
+            onCreatePlaylist = { name ->
+                onCreatePlaylistWithTrack(name, track.id)
+                trackToSave = null
+            },
+            onDismiss = { trackToSave = null },
+        )
+    }
+
+    // ── Delete confirmation dialog ──────────────────────────────────────
+    trackToDelete?.let { track ->
+        var alsoBlacklist by remember(track.id) { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = { trackToDelete = null },
+            title = { Text("Delete \"${track.title}\"?") },
+            text = {
+                Column {
+                    Text(
+                        "\"${track.title}\" by ${track.artist} will be removed from " +
+                            "your library and deleted from disk.",
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.clickable { alsoBlacklist = !alsoBlacklist },
+                    ) {
+                        androidx.compose.material3.Checkbox(
+                            checked = alsoBlacklist,
+                            onCheckedChange = { alsoBlacklist = it },
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Also block this song from future syncs",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            Text(
+                                text = "Blocked songs never re-download. Unblock them in Settings later.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDeleteTrack(track, alsoBlacklist)
+                        trackToDelete = null
+                    },
+                ) {
+                    Text(
+                        text = if (alsoBlacklist) "Delete & Block" else "Delete",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { trackToDelete = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+}
+
+// ── Search bar ───────────────────────────────────────────────────────────────
+
+@Composable
+private fun GlassSearchBar(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val extendedColors = StashTheme.extendedColors
+
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp)),
+        color = extendedColors.glassBackground,
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, extendedColors.glassBorder),
+    ) {
+        TextField(
+            value = query,
+            onValueChange = onQueryChange,
+            placeholder = {
+                Text(
+                    "Search library...",
+                    color = extendedColors.textTertiary,
+                )
+            },
+            leadingIcon = {
+                Icon(
+                    imageVector = Icons.Default.Search,
+                    contentDescription = "Search",
+                    tint = extendedColors.textTertiary,
+                )
+            },
+            singleLine = true,
+            colors = TextFieldDefaults.colors(
+                focusedContainerColor = Color.Transparent,
+                unfocusedContainerColor = Color.Transparent,
+                cursorColor = MaterialTheme.colorScheme.primary,
+                focusedIndicatorColor = Color.Transparent,
+                unfocusedIndicatorColor = Color.Transparent,
+                focusedTextColor = MaterialTheme.colorScheme.onBackground,
+                unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+// ── Local import progress strip ─────────────────────────────────────────────
+
+/**
+ * Compact banner that appears below the "Library" heading while
+ * [LocalImportState] is non-Idle. Shows progress during a batch import,
+ * a summary after Done, or an error + dismiss after Error. Hides
+ * completely when [state] is [LocalImportState.Idle].
+ */
+@Composable
+private fun LocalImportStrip(
+    state: com.stash.data.download.files.LocalImportState,
+    onCancel: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    when (state) {
+        com.stash.data.download.files.LocalImportState.Idle -> Unit
+        is com.stash.data.download.files.LocalImportState.Running -> {
+            Spacer(modifier = Modifier.height(8.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        text = "Importing ${state.current} of ${state.total}\u2026",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    androidx.compose.material3.TextButton(onClick = onCancel) {
+                        Text("Cancel")
+                    }
+                }
+                androidx.compose.material3.LinearProgressIndicator(
+                    progress = {
+                        if (state.total == 0) 0f
+                        else state.current.toFloat() / state.total.toFloat()
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+        is com.stash.data.download.files.LocalImportState.Done -> {
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = buildString {
+                        append("Imported ${state.imported} track")
+                        if (state.imported != 1) append("s")
+                        if (state.failed > 0) append(" \u2022 ${state.failed} failed")
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                androidx.compose.material3.TextButton(onClick = onDismiss) {
+                    Text("Dismiss")
+                }
+            }
+        }
+        is com.stash.data.download.files.LocalImportState.Error -> {
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Import failed",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Text(
+                        text = state.message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                androidx.compose.material3.TextButton(onClick = onDismiss) {
+                    Text("Dismiss")
+                }
+            }
+        }
+    }
+}
+
+// ── Playlists tab (2-column grid) ────────────────────────────────────────────
+
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@Composable
+private fun PlaylistsGrid(
+    playlists: List<Playlist>,
+    anyServiceConnected: Boolean,
+    onPlayPlaylist: (Playlist) -> Unit,
+    onAddPlaylistToQueue: (Playlist) -> Unit,
+    onRemovePlaylist: (Playlist) -> Unit,
+    onDeletePlaylist: (Playlist, Boolean) -> Unit,
+    followedPlaylistIds: Set<Long> = emptySet(),
+    onUnfollowPlaylist: (Playlist) -> Unit = {},
+    onSetPlaylistImage: (Long, Uri) -> Unit,
+    onRemovePlaylistImage: (Long) -> Unit,
+    onTogglePlaylistPinned: (Playlist) -> Unit,
+    onTogglePlaylistOnHome: (Playlist) -> Unit,
+    header: @Composable () -> Unit = {},
+) {
+    // Playlist selected for the context-menu bottom sheet.
+    var selectedPlaylist by remember { mutableStateOf<Playlist?>(null) }
+    // Playlist whose share sheet is open.
+    // Held as an id so the sheet survives rotation; the Playlist is looked up from the list shown.
+    var sharePlaylistId by rememberSaveable { mutableStateOf<Long?>(null) }
+    // Playlist pending delete confirmation.
+    var playlistToDelete by remember { mutableStateOf<Playlist?>(null) }
+    // Playlist awaiting image picker result.
+    var playlistForImagePick by remember { mutableStateOf<Playlist?>(null) }
+
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null && playlistForImagePick != null) {
+            onSetPlaylistImage(playlistForImagePick!!.id, uri)
+        }
+        playlistForImagePick = null
+    }
+
+    val gridState = rememberLazyGridState()
+    Box(Modifier.fillMaxSize()) {
+        LazyVerticalGrid(
+            state = gridState,
+            columns = GridCells.Fixed(2),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            // Full-width leading header (Shuffle hero + recent rail, Songs-tab only).
+            item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
+                header()
+            }
+            if (playlists.isEmpty()) {
+                item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
+                    EmptyTabMessage(
+                        if (anyServiceConnected) "Sync your playlists to see them here"
+                        else "Connect a service in Settings to see your playlists",
+                    )
+                }
+            }
+            items(playlists, key = { it.id }) { playlist ->
+                if (playlist.artUrl != null) {
+                    // Playlist with artwork: image background + dark overlay
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(140.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .combinedClickable(
+                                onClick = { onPlayPlaylist(playlist) },
+                                onLongClick = { selectedPlaylist = playlist },
+                            ),
+                    ) {
+                        AsyncImage(
+                            model = playlist.artUrl,
+                            contentDescription = "${playlist.name} artwork",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop,
+                        )
+                        // Dark scrim overlay for text legibility
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(
+                                    Brush.verticalGradient(
+                                        colors = listOf(
+                                            Color.Transparent,
+                                            Color.Black.copy(alpha = 0.7f),
+                                        ),
+                                        startY = 40f,
+                                    ),
+                                ),
+                        )
+                        // Text pinned to bottom
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                text = playlist.name,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Color.White,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                SourceIndicator(source = playlist.source)
+                                Text(
+                                    text = pluralize(playlist.trackCount, "track"),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.White.copy(alpha = 0.8f),
+                                )
+                            }
+                        }
+                    }
+                    if (playlist.pinned) {
+                            Icon(
+                                imageVector = Icons.Default.PushPin,
+                                contentDescription = "Pinned",
+                                tint = Color.White,
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(8.dp)
+                                    .size(16.dp),
+                            )
+                        }
+                } else {
+                    // No artwork: keep the original GlassCard look
+                    GlassCard(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .combinedClickable(
+                                onClick = { onPlayPlaylist(playlist) },
+                                onLongClick = { selectedPlaylist = playlist },
+                            ),
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = playlist.name,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onBackground,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                SourceIndicator(source = playlist.source)
+                                Text(
+                                    text = pluralize(playlist.trackCount, "track"),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        VerticalScrollbar(state = gridState)
+    }
+
+    // ── Context-menu bottom sheet ───────────────────────────────────────
+    selectedPlaylist?.let { playlist ->
+        val sheetState = rememberModalBottomSheetState()
+        ModalBottomSheet(
+            onDismissRequest = { selectedPlaylist = null },
+            sheetState = sheetState,
+            containerColor = MaterialTheme.colorScheme.surface,
+        ) {
+            // Header: playlist name + track count
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 8.dp),
+            ) {
+                Text(
+                    text = playlist.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = pluralize(playlist.trackCount, "track"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+            BottomSheetActionRow(
+                icon = if (playlist.pinned) Icons.Default.PushPin else Icons.Outlined.PushPin,
+                label = if (playlist.pinned) "Unpin Playlist" else "Pin Playlist",
+                onClick = {
+                    onTogglePlaylistPinned(playlist)
+                    selectedPlaylist = null
+                },
+            )
+
+            BottomSheetActionRow(
+                icon = if (playlist.pinnedToHomeAt != null) Icons.Filled.Home else Icons.Outlined.Home,
+                label = if (playlist.pinnedToHomeAt != null) "Remove from Home" else "Show on Home",
+                onClick = {
+                    onTogglePlaylistOnHome(playlist)
+                    selectedPlaylist = null
+                },
+            )
+
+            BottomSheetActionRow(
+                icon = Icons.Default.PlayArrow,
+                label = "Play All",
+                onClick = {
+                    onPlayPlaylist(playlist)
+                    selectedPlaylist = null
+                },
+            )
+            BottomSheetActionRow(
+                icon = Icons.Default.PlaylistAdd,
+                label = com.stash.core.ui.components.playNextLabel(com.stash.core.ui.components.LocalListenTogetherRole.current, "Add to Queue"), // session: queue or suggest
+                onClick = {
+                    onAddPlaylistToQueue(playlist)
+                    selectedPlaylist = null
+                },
+            )
+            BottomSheetActionRow(
+                icon = Icons.Default.Share,
+                label = "Share mix",
+                onClick = {
+                    sharePlaylistId = playlist.id
+                    selectedPlaylist = null
+                },
+            )
+            // An active follow is read-only (spec §6): no image edits, and Unfollow replaces Remove/Delete.
+            val followed = playlist.id in followedPlaylistIds
+            // Image options — only for custom playlists
+            if (playlist.type == PlaylistType.CUSTOM && !followed) {
+                BottomSheetActionRow(
+                    icon = Icons.Default.Image,
+                    label = if (playlist.artUrl != null) "Change Image" else "Add Image",
+                    onClick = {
+                        playlistForImagePick = playlist
+                        selectedPlaylist = null
+                        imagePickerLauncher.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    },
+                )
+
+                // Remove Image — only shown when a custom image is set
+                if (playlist.artUrl != null) {
+                    BottomSheetActionRow(
+                        icon = Icons.Default.ImageNotSupported,
+                        label = "Remove Image",
+                        onClick = {
+                            onRemovePlaylistImage(playlist.id)
+                            selectedPlaylist = null
+                        },
+                    )
+                }
+            }
+
+            if (followed) {
+                // Unfollow removes the playlist (and can take its downloads): second tap confirms.
+                var confirmUnfollow by remember(playlist.id) { mutableStateOf(false) }
+                BottomSheetActionRow(
+                    icon = Icons.Default.RemoveCircleOutline,
+                    label = if (confirmUnfollow) "Tap again to unfollow" else "Unfollow",
+                    tint = MaterialTheme.colorScheme.error,
+                    onClick = {
+                        if (confirmUnfollow) {
+                            onUnfollowPlaylist(playlist)
+                            selectedPlaylist = null
+                        } else {
+                            confirmUnfollow = true
+                        }
+                    },
+                )
+            } else {
+                BottomSheetActionRow(
+                    icon = Icons.Default.RemoveCircleOutline,
+                    label = "Remove Playlist",
+                    onClick = {
+                        onRemovePlaylist(playlist)
+                        selectedPlaylist = null
+                    },
+                )
+                BottomSheetActionRow(
+                    icon = Icons.Default.Delete,
+                    label = "Delete Playlist & Songs",
+                    tint = MaterialTheme.colorScheme.error,
+                    onClick = {
+                        playlistToDelete = playlist
+                        selectedPlaylist = null
+                    },
+                )
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+        }
+    }
+
+    sharePlaylistId?.let { id -> playlists.firstOrNull { it.id == id } }?.let {
+        com.stash.feature.library.share.ShareMixSheet(it.id, it.name, it.trackCount, onDismiss = { sharePlaylistId = null })
+    }
+
+    // ── Delete confirmation dialog ──────────────────────────────────────
+    playlistToDelete?.let { playlist ->
+        var alsoBlacklist by remember(playlist.id) { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = { playlistToDelete = null },
+            title = { Text("Delete \"${playlist.name}\"?") },
+            text = {
+                Column {
+                    Text(
+                        "\"${playlist.name}\" and all its tracks will be removed from " +
+                            "your library and deleted from disk. This cannot be undone.",
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.clickable { alsoBlacklist = !alsoBlacklist },
+                    ) {
+                        androidx.compose.material3.Checkbox(
+                            checked = alsoBlacklist,
+                            onCheckedChange = { alsoBlacklist = it },
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Also block these songs from future syncs",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            Text(
+                                text = "Blocked songs never re-download. Unblock them in Settings later.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDeletePlaylist(playlist, alsoBlacklist)
+                        playlistToDelete = null
+                    },
+                ) {
+                    Text(
+                        text = if (alsoBlacklist) "Delete & Block" else "Delete",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { playlistToDelete = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+}
+
+// ── Tracks tab (lazy column of TrackListItems) ──────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TracksTab(
+    tracks: List<Track>,
+    currentlyPlayingTrackId: Long?,
+    onTrackClick: (Track) -> Unit,
+    onPlayNext: (Track) -> Unit,
+    onAddToQueue: (Track) -> Unit,
+    onDeleteTrack: (Track, Boolean) -> Unit,
+    onViewAlbum: (Track) -> Unit,
+    anyServiceConnected: Boolean,
+    selection: SelectionState,
+    userPlaylists: List<com.stash.core.ui.components.PlaylistInfo>,
+    onSaveToPlaylist: (trackId: Long, playlistId: Long) -> Unit,
+    onCreatePlaylistWithTrack: (name: String, trackId: Long) -> Unit,
+    onDownloadTrack: (Long) -> Unit,
+    onRemoveDownloadTrack: (Long) -> Unit,
+    header: @Composable () -> Unit = {},
+) {
+    if (tracks.isEmpty()) {
+        Column {
+            header()
+            EmptyTabMessage(
+                if (anyServiceConnected) "Sync your library to see tracks here"
+                else "Connect a service in Settings to see your tracks",
+            )
+        }
+        return
+    }
+
+    // Track selected for the context-menu bottom sheet (opened via the ⋮ now;
+    // long-press enters multi-select instead).
+    var selectedTrack by remember { mutableStateOf<Track?>(null) }
+    // Track whose share sheet is open (fork issue ParaliyzedEvo/Stash#40).
+    var trackToShare by remember { mutableStateOf<Track?>(null) }
+    trackToShare?.let { t ->
+        com.stash.core.ui.components.ShareTrackSheet(
+            track = t,
+            onDismiss = { trackToShare = null },
+        )
+    }
+    // Track whose Save-to-Playlist sheet is open (single-track path).
+    var trackToSave by remember { mutableStateOf<Track?>(null) }
+    // Track pending delete confirmation.
+    var trackToDelete by remember { mutableStateOf<Track?>(null) }
+
+    val listState = rememberLazyListState()
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(
+            state = listState,
+            // While selecting, the mini-player hides (Task 7) but the bottom
+            // selection bar takes its place — pad enough that the last row clears
+            // it in either state.
+            contentPadding = PaddingValues(bottom = if (selection.isActive) 140.dp else 0.dp),
+        ) {
+            item { header() }
+            items(tracks, key = { it.id }) { track ->
+                TrackListItem(
+                    track = track,
+                    onClick = {
+                        if (selection.isActive) selection.toggle(track.id)
+                        else onTrackClick(track)
+                    },
+                    isPlaying = track.id == currentlyPlayingTrackId,
+                    onLongPress = { if (!selection.isActive) selection.enter(track.id) },
+                    selectionActive = selection.isActive,
+                    selected = selection.isSelected(track.id),
+                    onMoreClick = { selectedTrack = track },
+                )
+            }
+        }
+        VerticalScrollbar(state = listState)
+    }
+
+    // ── Context-menu bottom sheet (shared component) ────────────────────
+    selectedTrack?.let { track ->
+        val sheetState = rememberModalBottomSheetState()
+        ModalBottomSheet(
+            onDismissRequest = { selectedTrack = null },
+            sheetState = sheetState,
+            containerColor = MaterialTheme.colorScheme.surface,
+        ) {
+            com.stash.core.ui.components.TrackOptionsSheet(
+                track = track,
+                onPlayNext = { onPlayNext(it); selectedTrack = null },
+                onAddToQueue = { onAddToQueue(it); selectedTrack = null },
+                onSaveToPlaylist = { trackToSave = it; selectedTrack = null },
+                onDismiss = { selectedTrack = null },
+                onShare = { trackToShare = it; selectedTrack = null },
+                onViewAlbum = { onViewAlbum(it); selectedTrack = null },
+                onDownload = { onDownloadTrack(it.id); selectedTrack = null },
+                onRemoveDownload = { onRemoveDownloadTrack(it.id); selectedTrack = null },
+                onDelete = { trackToDelete = it; selectedTrack = null },
+            )
+
+            // Bottom padding for gesture navigation inset
+            Spacer(modifier = Modifier.height(24.dp))
+        }
+    }
+
+    // ── Save to Playlist sheet (single-track) ───────────────────────────
+    trackToSave?.let { track ->
+        com.stash.core.ui.components.SaveToPlaylistSheet(
+            playlists = userPlaylists,
+            onSaveToPlaylist = { playlistId ->
+                onSaveToPlaylist(track.id, playlistId)
+                trackToSave = null
+            },
+            onCreatePlaylist = { name ->
+                onCreatePlaylistWithTrack(name, track.id)
+                trackToSave = null
+            },
+            onDismiss = { trackToSave = null },
+        )
+    }
+
+    // ── Delete confirmation dialog ──────────────────────────────────────
+    trackToDelete?.let { track ->
+        var alsoBlacklist by remember(track.id) { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = { trackToDelete = null },
+            title = { Text("Delete \"${track.title}\"?") },
+            text = {
+                Column {
+                    Text(
+                        "\"${track.title}\" by ${track.artist} will be removed from " +
+                            "your library and deleted from disk.",
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.clickable { alsoBlacklist = !alsoBlacklist },
+                    ) {
+                        androidx.compose.material3.Checkbox(
+                            checked = alsoBlacklist,
+                            onCheckedChange = { alsoBlacklist = it },
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Also block this song from future syncs",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            Text(
+                                text = "Blocked songs never re-download. Unblock them in Settings later.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDeleteTrack(track, alsoBlacklist)
+                        trackToDelete = null
+                    },
+                ) {
+                    Text(
+                        text = if (alsoBlacklist) "Delete & Block" else "Delete",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { trackToDelete = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+}
+
+/**
+ * A single action row inside the track context-menu bottom sheet.
+ *
+ * @param icon  Leading icon for the action.
+ * @param label Human-readable label.
+ * @param tint  Icon and label color. Defaults to [MaterialTheme.colorScheme.onSurface].
+ * @param onClick Callback when the row is tapped.
+ */
+@Composable
+private fun BottomSheetActionRow(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    tint: Color = MaterialTheme.colorScheme.onSurface,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = tint,
+            modifier = Modifier.size(24.dp),
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyLarge,
+            color = tint,
+        )
+    }
+}
+
+// ── Artists tab (2-column grid) ──────────────────────────────────────────────
+
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@Composable
+private fun ArtistsGrid(
+    artists: List<ArtistInfo>,
+    singleTrackArtists: List<ArtistInfo>,
+    anyServiceConnected: Boolean,
+    onPlayArtist: (String) -> Unit,
+    onAddArtistToQueue: (String) -> Unit,
+    onDeleteArtist: (String) -> Unit,
+    header: @Composable () -> Unit = {},
+) {
+    if (artists.isEmpty() && singleTrackArtists.isEmpty()) {
+        Column {
+            header()
+            EmptyTabMessage(
+                if (anyServiceConnected) "Sync your library to see artists here"
+                else "Connect a service in Settings to see your artists",
+            )
+        }
+        return
+    }
+
+    var artistToDelete by remember { mutableStateOf<ArtistInfo?>(null) }
+    var selectedArtist by remember { mutableStateOf<ArtistInfo?>(null) }
+    var showSingleTrack by remember { mutableStateOf(false) }
+
+    val displayList = if (showSingleTrack) artists + singleTrackArtists else artists
+
+    val gridState = rememberLazyGridState()
+    Box(Modifier.fillMaxSize()) {
+        LazyVerticalGrid(
+            state = gridState,
+            columns = GridCells.Fixed(2),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            item(span = { GridItemSpan(maxLineSpan) }) { header() }
+            items(displayList, key = { it.name }) { artist ->
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp)
+                        .combinedClickable(
+                            onClick = { onPlayArtist(artist.name) },
+                            onLongClick = { selectedArtist = artist },
+                        ),
+                ) {
+                    ArtistAvatar(
+                        name = artist.name,
+                        photoUrl = artist.photoUrl,
+                        artUrl = artist.artUrl,
+                        size = 72.dp,
+                    )
+                    Text(
+                        text = artist.name,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center,
+                    )
+                    Text(
+                        text = pluralize(artist.trackCount, "track"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            // Collapsible section for single-track artists
+            if (singleTrackArtists.isNotEmpty()) {
+                item(span = { GridItemSpan(2) }) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp)
+                            .clickable { showSingleTrack = !showSingleTrack },
+                        color = StashTheme.extendedColors.glassBackground,
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp, StashTheme.extendedColors.glassBorder,
+                        ),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(
+                                text = if (showSingleTrack) "Hide single-track artists"
+                                else "${singleTrackArtists.size} artists with 1 track",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Icon(
+                                imageVector = if (showSingleTrack) Icons.Default.ExpandLess
+                                else Icons.Default.ExpandMore,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        VerticalScrollbar(state = gridState)
+    }
+
+    // ── Context-menu bottom sheet ───────────────────────────────────────
+    selectedArtist?.let { artist ->
+        val sheetState = rememberModalBottomSheetState()
+        ModalBottomSheet(
+            onDismissRequest = { selectedArtist = null },
+            sheetState = sheetState,
+            containerColor = MaterialTheme.colorScheme.surface,
+        ) {
+            // Header: artist name + track count
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 8.dp),
+            ) {
+                Text(
+                    text = artist.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = pluralize(artist.trackCount, "track"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+            BottomSheetActionRow(
+                icon = Icons.Default.PlayArrow,
+                label = "Play All by Artist",
+                onClick = {
+                    onPlayArtist(artist.name)
+                    selectedArtist = null
+                },
+            )
+            BottomSheetActionRow(
+                icon = Icons.Default.PlaylistAdd,
+                label = com.stash.core.ui.components.playNextLabel(com.stash.core.ui.components.LocalListenTogetherRole.current, "Add to Queue"), // session: queue or suggest
+                onClick = {
+                    onAddArtistToQueue(artist.name)
+                    selectedArtist = null
+                },
+            )
+            BottomSheetActionRow(
+                icon = Icons.Default.Delete,
+                label = "Delete All by Artist",
+                tint = MaterialTheme.colorScheme.error,
+                onClick = {
+                    artistToDelete = artist
+                    selectedArtist = null
+                },
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+        }
+    }
+
+    // Delete artist confirmation
+    artistToDelete?.let { artist ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { artistToDelete = null },
+            title = { Text("Delete all by ${artist.name}?") },
+            text = { Text("This will delete all ${artist.trackCount} downloaded songs by this artist from your device.") },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        onDeleteArtist(artist.name)
+                        artistToDelete = null
+                    },
+                ) {
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { artistToDelete = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+}
+
+// ── Albums tab (2-column grid) ───────────────────────────────────────────────
+
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@Composable
+private fun AlbumsGrid(
+    albums: List<AlbumInfo>,
+    singleTrackAlbums: List<AlbumInfo>,
+    anyServiceConnected: Boolean,
+    onPlayAlbum: (String, String) -> Unit,
+    onAddAlbumToQueue: (String, String) -> Unit,
+    onOpenAlbum: (AlbumInfo) -> Unit,
+    header: @Composable () -> Unit = {},
+) {
+    if (albums.isEmpty() && singleTrackAlbums.isEmpty()) {
+        Column {
+            header()
+            EmptyTabMessage(
+                if (anyServiceConnected) "Sync your library to see albums here"
+                else "Connect a service in Settings to see your albums",
+            )
+        }
+        return
+    }
+
+    var selectedAlbum by remember { mutableStateOf<AlbumInfo?>(null) }
+    var showSingleTrack by remember { mutableStateOf(false) }
+
+    val displayList = if (showSingleTrack) albums + singleTrackAlbums else albums
+
+    val gridState = rememberLazyGridState()
+    Box(Modifier.fillMaxSize()) {
+        LazyVerticalGrid(
+            state = gridState,
+            columns = GridCells.Fixed(2),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            item(span = { GridItemSpan(maxLineSpan) }) { header() }
+            items(displayList, key = { "${it.name}|${it.artist}" }) { album ->
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp)
+                        .combinedClickable(
+                            onClick = { onOpenAlbum(album) },
+                            onLongClick = { selectedAlbum = album },
+                        ),
+                ) {
+                    // Album art: try local path, then remote URL, then fallback icon.
+                    // AlbumArtwork also falls back to the icon while a remote
+                    // image is loading or after it errors — a failed URL used to
+                    // render as an empty grey box.
+                    val artModel = album.artPath ?: album.artUrl
+                    AlbumArtwork(
+                        model = artModel,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(120.dp)
+                            .clip(RoundedCornerShape(8.dp)),
+                    ) {
+                        Surface(
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(8.dp)
+                                .size(32.dp)
+                                .clip(CircleShape)
+                                .clickable { onPlayAlbum(album.name, album.artist) },
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                            shape = CircleShape,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PlayArrow,
+                                contentDescription = "Play ${album.name}",
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(4.dp),
+                            )
+                        }
+                    }
+                    Text(
+                        text = album.name,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(
+                            text = album.artist,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        Text(
+                            text = "· ${album.trackCount}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+
+            // Collapsible section for single-track albums
+            if (singleTrackAlbums.isNotEmpty()) {
+                item(span = { GridItemSpan(2) }) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp)
+                            .clickable { showSingleTrack = !showSingleTrack },
+                        color = StashTheme.extendedColors.glassBackground,
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp, StashTheme.extendedColors.glassBorder,
+                        ),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(
+                                text = if (showSingleTrack) "Hide single-track albums"
+                                else "${singleTrackAlbums.size} albums with 1 track",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Icon(
+                                imageVector = if (showSingleTrack) Icons.Default.ExpandLess
+                                else Icons.Default.ExpandMore,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        VerticalScrollbar(state = gridState)
+    }
+
+    // ── Context-menu bottom sheet ───────────────────────────────────────
+    selectedAlbum?.let { album ->
+        val sheetState = rememberModalBottomSheetState()
+        ModalBottomSheet(
+            onDismissRequest = { selectedAlbum = null },
+            sheetState = sheetState,
+            containerColor = MaterialTheme.colorScheme.surface,
+        ) {
+            // Header: album name + artist
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 8.dp),
+            ) {
+                Text(
+                    text = album.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = album.artist,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+            BottomSheetActionRow(
+                icon = Icons.Default.PlayArrow,
+                label = "Play Album",
+                onClick = {
+                    onPlayAlbum(album.name, album.artist)
+                    selectedAlbum = null
+                },
+            )
+            BottomSheetActionRow(
+                icon = Icons.Default.PlaylistAdd,
+                label = com.stash.core.ui.components.playNextLabel(com.stash.core.ui.components.LocalListenTogetherRole.current, "Add to Queue"), // session: queue or suggest
+                onClick = {
+                    onAddAlbumToQueue(album.name, album.artist)
+                    selectedAlbum = null
+                },
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+        }
+    }
+}
+
+/**
+ * Album artwork with a graceful fallback. Shows the image once it actually
+ * loads; while a remote image is loading, and after it errors, a placeholder
+ * album icon renders on the elevated surface instead of an empty grey box.
+ */
+@Composable
+private fun AlbumArtwork(
+    model: Any?,
+    modifier: Modifier = Modifier,
+    content: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit = {},
+) {
+    Box(
+        modifier = modifier.background(StashTheme.extendedColors.elevatedSurface),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (model != null) {
+            val painter = rememberAsyncImagePainter(model = model)
+            val state by painter.state.collectAsState()
+            if (state is AsyncImagePainter.State.Success) {
+                Image(
+                    painter = painter,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Default.Album,
+                    contentDescription = null,
+                    tint = StashTheme.extendedColors.textTertiary,
+                    modifier = Modifier.size(40.dp),
+                )
+            }
+        } else {
+            Icon(
+                imageVector = Icons.Default.Album,
+                contentDescription = null,
+                tint = StashTheme.extendedColors.textTertiary,
+                modifier = Modifier.size(40.dp),
+            )
+        }
+        content()
+    }
+}
+
+// ── Artist gradient helper ───────────────────────────────────────────────────
+
+/**
+ * Pre-defined gradient pairs used for artist avatar backgrounds.
+ * A deterministic pair is picked based on the hash of the artist name,
+ * giving each artist a unique-ish but consistent color.
+ */
+private val artistGradientPalette = listOf(
+    listOf(Color(0xFF6366F1), Color(0xFF8B5CF6)),  // Indigo -> Violet
+    listOf(Color(0xFFEC4899), Color(0xFFF43F5E)),  // Pink -> Rose
+    listOf(Color(0xFF14B8A6), Color(0xFF06B6D4)),  // Teal -> Cyan
+    listOf(Color(0xFFF97316), Color(0xFFEAB308)),  // Orange -> Yellow
+    listOf(Color(0xFF3B82F6), Color(0xFF6366F1)),  // Blue -> Indigo
+    listOf(Color(0xFF10B981), Color(0xFF14B8A6)),  // Emerald -> Teal
+    listOf(Color(0xFFE11D48), Color(0xFFDB2777)),  // Rose -> Pink
+    listOf(Color(0xFF8B5CF6), Color(0xFFA855F7)),  // Violet -> Purple
+)
+
+/**
+ * Returns a gradient color list for a given artist name.
+ * The selection is deterministic so the same artist always gets the same gradient.
+ */
+private fun artistGradient(name: String): List<Color> {
+    val index = name.hashCode().absoluteValue % artistGradientPalette.size
+    return artistGradientPalette[index]
+}
+
+/**
+ * Artist circular avatar for the Artists grid: the cached official photo
+ * ([ArtistInfo.photoUrl]) when available, else the album-art proxy
+ * ([ArtistInfo.artUrl]), else a gradient-initial circle. Coil draws the photo;
+ * while it loads (or if it errors) the gradient initial is shown so a failed
+ * fetch never leaves an empty ring.
+ */
+@Composable
+private fun ArtistAvatar(
+    name: String,
+    photoUrl: String?,
+    artUrl: String?,
+    size: Dp,
+) {
+    val model = photoUrl ?: artUrl
+    if (model != null) {
+        val painter = rememberAsyncImagePainter(model = model)
+        val state by painter.state.collectAsState()
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (state is AsyncImagePainter.State.Success) {
+                Image(
+                    painter = painter,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                )
+            } else {
+                ArtistInitialFallback(name, size)
+            }
+        }
+    } else {
+        ArtistInitialFallback(name, size)
+    }
+}
+
+/** Gradient circle with the artist's first letter — the no-photo fallback. */
+@Composable
+private fun ArtistInitialFallback(name: String, size: Dp) {
+    val gradientColors = remember(name) { artistGradient(name) }
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(Brush.linearGradient(gradientColors)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = name.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold,
+            color = Color.White,
+        )
+    }
+}
+
+// ── Empty state placeholder ──────────────────────────────────────────────────
+
+@Composable
+private fun EmptyTabMessage(message: String) {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyLarge,
+            color = StashTheme.extendedColors.textTertiary,
+        )
+    }
+}
