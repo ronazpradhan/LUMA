@@ -81,11 +81,7 @@ Needs JDK 17 and Android SDK 35.
 
 ## Credits
 
-LUMA is a fork of **[Stash](https://github.com/rawnaldclark/Stash)** by Rawnald Clark and contributors. The sync engine, player, downloads, lyrics and most of the rest is their work. Give Stash a ⭐. LUMA is not affiliated with Stash; report LUMA bugs here, not there.
-
-**Changed from Stash:** new name, logo and package (`com.luma.music`, installs alongside Stash); YouTube Music home feed instead of Qobuz rows; autoplay on by default; auto-download switches; Spotify link import; listening-based suggestions; redesigned glass UI and player; faster song start; Qobuz/lossless removed; own release key and update popup; Stash donation prompts, supporter ticker and links removed; fixes for empty playlists in Download mode and Home tab navigation.
-
-Also built on [yt-dlp](https://github.com/yt-dlp/yt-dlp), [youtubedl-android](https://github.com/JunkFood02/youtubedl-android), [QuickJS-NG](https://github.com/quickjs-ng/quickjs), [Media3 / ExoPlayer](https://github.com/androidx/media), [Haze](https://github.com/chrisbanes/haze), with [ytmusicapi](https://github.com/sigma67/ytmusicapi) and [Spicy Lyrics](https://github.com/Spikerko/spicy-lyrics) as references.
+LUMA is a modified fork of **[Stash](https://github.com/rawnaldclark/Stash)** by Rawnald Clark and contributors, modified by Ronaz Pradhan in 2026. Not affiliated with Stash; report LUMA bugs here.
 
 ## Legal
 
