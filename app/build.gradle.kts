@@ -34,10 +34,10 @@ val keystoreProperties = Properties().apply {
 fun signingProp(key: String, envKey: String): String? =
     keystoreProperties.getProperty(key) ?: System.getenv(envKey)
 
-val releaseStoreFilePath = signingProp("storeFile", "STASH_KEYSTORE_FILE")
-val releaseStorePassword = signingProp("storePassword", "STASH_KEYSTORE_PASSWORD")
-val releaseKeyAlias = signingProp("keyAlias", "STASH_KEY_ALIAS")
-val releaseKeyPassword = signingProp("keyPassword", "STASH_KEY_PASSWORD")
+val releaseStoreFilePath = signingProp("storeFile", "LUMA_KEYSTORE_FILE")
+val releaseStorePassword = signingProp("storePassword", "LUMA_KEYSTORE_PASSWORD")
+val releaseKeyAlias = signingProp("keyAlias", "LUMA_KEY_ALIAS")
+val releaseKeyPassword = signingProp("keyPassword", "LUMA_KEY_PASSWORD")
 
 val hasReleaseSigning = releaseStoreFilePath != null &&
     releaseStorePassword != null &&
@@ -70,14 +70,14 @@ val lastFmApiSecret: String =
 // primary key above. Empty by default.
 val lastFmExtraApiKeys: String =
     localProperties.getProperty("lastfm.extraApiKeys") ?: System.getenv("LASTFM_EXTRA_API_KEYS").orEmpty()
-// Optional Stash Last.fm proxy Worker base URL. When set, generic read lookups
+// Optional LUMA Last.fm proxy Worker base URL. When set, generic read lookups
 // route through it (the Worker holds the server key + shared cache), decoupling
 // Last.fm load from user count. Empty = app talks to Last.fm directly.
 val lastFmProxyUrl: String =
     localProperties.getProperty("lastfm.proxyUrl") ?: System.getenv("LASTFM_PROXY_URL").orEmpty()
 
 android {
-    namespace = "com.stash.app"
+    namespace = "com.luma.app"
     compileSdk = 35
     defaultConfig {
         applicationId = "com.luma.music"
@@ -106,9 +106,9 @@ android {
         // Online-Streaming Engine master kill-switch. Flipped to `true` once
         // the engine has been validated end-to-end (see Task 23 of the
         // online-streaming-engine plan). Until then the Home toggle stays
-        // hidden and the Hilt wiring in StashApplication stays inert. The
+        // hidden and the Hilt wiring in LumaApplication stays inert. The
         // feature-module-facing mirror lives at
-        // `com.stash.core.common.constants.StashConstants.STREAMING_ENGINE_ENABLED`
+        // `com.luma.core.common.constants.LumaConstants.STREAMING_ENGINE_ENABLED`
         // — keep both in sync (Task 23 flips both at once).
         buildConfigField("Boolean", "STREAMING_ENGINE_ENABLED", "true")
     }
@@ -182,6 +182,7 @@ kotlin {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     implementation(project(":core:ui"))
     implementation(project(":core:model"))
     implementation(project(":core:common"))
@@ -197,10 +198,10 @@ dependencies {
     implementation(project(":feature:community"))
     implementation(project(":data:download"))
     // data:ytmusic provides AlbumSummary, used by SearchScreen/ArtistProfileScreen
-    // callback signatures that StashNavHost wires up for Album Discovery.
+    // callback signatures that LumaNavHost wires up for Album Discovery.
     implementation(project(":data:ytmusic"))
     // data:lyrics exposes LyricsBackfillScheduler for the v0.9.36 once-per-version
-    // auto-enqueue path wired in StashApplication.onCreate.
+    // auto-enqueue path wired in LumaApplication.onCreate.
     implementation(project(":data:lyrics"))
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
@@ -215,7 +216,7 @@ dependencies {
     implementation(libs.core.ktx)
     implementation(libs.activity.compose)
     implementation(libs.lifecycle.runtime.compose)
-    // ProcessLifecycleOwner — used by StashApplication to start/stop
+    // ProcessLifecycleOwner — used by LumaApplication to start/stop
     // SquidCookieAutoRefresher on app foreground/background transitions.
     implementation(libs.lifecycle.process)
     implementation(libs.navigation.compose)

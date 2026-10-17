@@ -11,7 +11,7 @@
             android:resource="@xml/automotive_app_desc" />
 
         <service
-            android:name="com.stash.core.media.service.StashPlaybackService"
+            android:name="com.luma.core.media.service.LumaPlaybackService"
             android:exported="true"
             android:foregroundServiceType="mediaPlayback">
             <intent-filter>

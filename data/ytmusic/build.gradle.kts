@@ -1,12 +1,12 @@
 plugins {
-    id("stash.android.library")
+    id("luma.android.library")
     alias(libs.plugins.hilt)
     alias(libs.plugins.ksp)
     alias(libs.plugins.kotlin.serialization)
 }
 
 android {
-    namespace = "com.stash.data.ytmusic"
+    namespace = "com.luma.data.ytmusic"
 
     testOptions {
         unitTests {

@@ -4,7 +4,7 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
     <!--
-        Self-contained launcher-shortcut icon: a solid Stash-purple
+        Self-contained launcher-shortcut icon: a solid Luma-purple
         (#8B5CF6) background with a white play triangle. The full-bleed
         background keeps it visible on any launcher popup (light or dark)
         and survives circular masking — the previous icon was a white

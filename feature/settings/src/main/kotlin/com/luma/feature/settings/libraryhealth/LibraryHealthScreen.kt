@@ -1,0 +1,637 @@
+package com.luma.feature.settings.libraryhealth
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.luma.core.data.db.dao.LibraryHealthBucket
+import com.luma.core.ui.components.GlassCard
+import com.luma.core.ui.components.SectionHeader
+import com.luma.core.ui.theme.LumaTheme
+import com.luma.data.download.lyrics.LyricsFetchStatus
+import com.luma.feature.settings.FlacUpgradeUiState
+import com.luma.feature.settings.FlacUpgradeViewModel
+
+/**
+ * Library Health screen — answers "what's actually in my library?" by
+ * histograming downloaded tracks across (codec, bitrate-band) buckets read
+ * straight from the DB.
+ *
+ * Two reasons this exists:
+ *  1. Verifying yield of the MAX (format-141) experiment — switch tier,
+ *     re-download a sample, watch the AAC ~256 / Opus ~160 / AAC ~128 split
+ *     change in real time.
+ *  2. Backfilling pre-v0.8.1 rows whose `file_format` / `quality_kbps`
+ *     columns sat at defaults because the sync writer never populated them.
+ */
+@Composable
+fun LibraryHealthScreen(
+    onNavigateBack: () -> Unit,
+    viewModel: LibraryHealthViewModel = hiltViewModel(),
+    lyricsViewModel: LyricsFetchViewModel = hiltViewModel(),
+    flacViewModel: FlacUpgradeViewModel = hiltViewModel(),
+) {
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    val lyricsStatus by lyricsViewModel.status.collectAsStateWithLifecycle()
+    val flacState by flacViewModel.state.collectAsStateWithLifecycle()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp),
+    ) {
+        Spacer(Modifier.height(16.dp))
+
+        Header(onBack = onNavigateBack)
+
+        Spacer(Modifier.height(8.dp))
+
+        Text(
+            text = "Format and bitrate breakdown of every downloaded track. Use this to " +
+                "verify what your sync is actually pulling down.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 4.dp),
+        )
+
+        Spacer(Modifier.height(16.dp))
+
+        SectionHeader(title = "Library breakdown")
+
+        if (state.buckets.isEmpty()) {
+            EmptyHint()
+        } else {
+            HistogramCard(buckets = state.buckets)
+        }
+
+        Spacer(Modifier.height(20.dp))
+
+        BackfillSection(
+            status = state.backfill,
+            buckets = state.buckets,
+            onRunBackfill = viewModel::runBackfill,
+        )
+
+        Spacer(Modifier.height(20.dp))
+
+        if (state.restorableDownloads > 0 || state.restoreQueued != null) {
+            RestoreDownloadsSection(
+                missing = state.restorableDownloads,
+                queued = state.restoreQueued,
+                onRestore = viewModel::restoreMissingDownloads,
+                onDismiss = viewModel::dismissRestoreResult,
+            )
+            Spacer(Modifier.height(20.dp))
+        }
+
+        VerifyLibrarySection(
+            status = state.verification,
+            onRunVerification = viewModel::runVerification,
+        )
+
+        Spacer(Modifier.height(20.dp))
+
+        QualityInfoRefreshSection(onClick = viewModel::runQualityInfoBackfill)
+
+        Spacer(Modifier.height(20.dp))
+
+        // LUMA: no lossless, so no FLAC upgrades section.
+
+        Spacer(Modifier.height(20.dp))
+
+        LyricsFetchSection(
+            status = lyricsStatus,
+            onFetch = lyricsViewModel::fetchLyrics,
+        )
+
+        Spacer(Modifier.height(40.dp))
+    }
+}
+
+@Composable
+private fun Header(onBack: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = onBack) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = "Back",
+                tint = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+        Spacer(Modifier.size(4.dp))
+        Text(
+            text = "Library Health",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+@Composable
+private fun EmptyHint() {
+    GlassCard {
+        Text(
+            text = "No downloaded tracks yet. Run a sync first.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(20.dp),
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+@Composable
+private fun HistogramCard(buckets: List<LibraryHealthBucket>) {
+    val total = buckets.sumOf { it.trackCount }.coerceAtLeast(1)
+
+    GlassCard {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            // Total summary row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Total downloaded",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = "$total",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+
+            buckets.forEach { bucket ->
+                BucketRow(bucket = bucket, totalForPercent = total)
+            }
+        }
+    }
+}
+
+@Composable
+private fun BucketRow(bucket: LibraryHealthBucket, totalForPercent: Int) {
+    val pct = bucket.trackCount.toFloat() / totalForPercent.toFloat()
+    val pctLabel = "%.1f%%".format(pct * 100)
+    val avgKbpsLabel = if (bucket.avgKbps > 0.0) " · avg ${bucket.avgKbps.toInt()} kbps" else ""
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "${humanizeFormat(bucket.format)} ${bucket.kbpsBucket}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = "${bucket.trackCount} · $pctLabel",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        Spacer(Modifier.height(4.dp))
+
+        // Percentage bar — solid fill, no shimmer.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(6.dp)
+                .clip(RoundedCornerShape(3.dp))
+                .background(LumaTheme.extendedColors.elevatedSurface),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(fraction = pct)
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(MaterialTheme.colorScheme.primary),
+            )
+        }
+
+        if (avgKbpsLabel.isNotEmpty()) {
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = avgKbpsLabel.trimStart(' ', '·', ' '),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun BackfillSection(
+    status: BackfillStatus,
+    buckets: List<LibraryHealthBucket>,
+    onRunBackfill: () -> Unit,
+) {
+    // Only worth showing the backfill button if there's at least one
+    // legacy "unknown" row left to clean up.
+    val unknownCount = buckets
+        .filter { it.format == "opus" && it.kbpsBucket == "unknown" }
+        .sumOf { it.trackCount }
+
+    if (unknownCount == 0 && status is BackfillStatus.Idle) return
+
+    SectionHeader(title = "Backfill metadata")
+
+    GlassCard {
+        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+            when (status) {
+                BackfillStatus.Idle -> {
+                    Text(
+                        text = "$unknownCount tracks were downloaded before v0.8.1 and " +
+                            "still show as unknown format. Run a one-time scan to read " +
+                            "their actual codec and bitrate from disk.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = onRunBackfill) {
+                        Text("Scan files")
+                    }
+                }
+                is BackfillStatus.Running -> {
+                    val total = status.total.coerceAtLeast(1)
+                    Text(
+                        text = "Scanning… ${status.processed} / ${status.total}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    LinearProgressIndicator(
+                        progress = { status.processed.toFloat() / total.toFloat() },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                is BackfillStatus.Done -> {
+                    Text(
+                        text = "Scan complete: ${status.processed} of ${status.total} " +
+                            "tracks updated.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    if (unknownCount > 0) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "$unknownCount tracks still couldn't be read — likely " +
+                                "missing on disk or unsupported by MediaMetadataRetriever.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Button(onClick = onRunBackfill) {
+                            Text("Retry scan")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Offered only when the library remembers downloads this device no longer
+ * has — restoring a backup onto a fresh install is the case that produces
+ * them in bulk, since the archive carries the library and not the audio.
+ */
+@Composable
+private fun RestoreDownloadsSection(
+    missing: Int,
+    queued: Int?,
+    onRestore: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    SectionHeader(title = "Missing downloads")
+
+    GlassCard {
+        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+            if (queued != null) {
+                Text(
+                    text = "Queued $queued ${if (queued == 1) "track" else "tracks"}. " +
+                        "They download in the background — the Sync tab shows progress.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.height(12.dp))
+                Button(onClick = onDismiss) { Text("Done") }
+            } else {
+                Text(
+                    text = "$missing ${if (missing == 1) "track was" else "tracks were"} " +
+                        "downloaded before but the ${if (missing == 1) "file is" else "files are"} " +
+                        "not on this device. Connect the accounts they came from first, " +
+                        "then download them again.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(12.dp))
+                Button(onClick = onRestore) {
+                    Text("Download $missing again")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VerifyLibrarySection(
+    status: LibraryVerificationStatus,
+    onRunVerification: () -> Unit,
+) {
+    SectionHeader(title = "Verify library")
+
+    GlassCard {
+        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+            when (status) {
+                LibraryVerificationStatus.Idle -> {
+                    Text(
+                        text = "Reconcile the download queue against your library and " +
+                            "rebuild the track and storage stats shown on the Sync tab. " +
+                            "Doesn't touch playlists or trigger any network sync.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = onRunVerification) {
+                        Text("Verify")
+                    }
+                }
+                is LibraryVerificationStatus.Running -> {
+                    val total = status.total.coerceAtLeast(1)
+                    Text(
+                        text = "Checking library… ${status.step} / ${status.total}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    LinearProgressIndicator(
+                        progress = { status.step.toFloat() / total.toFloat() },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                is LibraryVerificationStatus.Done -> {
+                    val r = status.reconciliation
+                    val a = status.adoption
+                    Text(
+                        text = "Verified — ${r.filesMissing} missing file${if (r.filesMissing == 1) "" else "s"} found, " +
+                            "${r.orphansSwept} stale entr${if (r.orphansSwept == 1) "y" else "ies"} cleaned up.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    if (a.adopted > 0) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = "Found ${a.adopted} song${if (a.adopted == 1) "" else "s"} already on disk and added to your library.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    } else if (a.scanned > 0) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = "Checked ${a.scanned} track${if (a.scanned == 1) "" else "s"} not yet downloaded — none matched a file on disk.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = onRunVerification) {
+                        Text("Verify again")
+                    }
+                }
+                is LibraryVerificationStatus.Failed -> {
+                    Text(
+                        text = "Verification couldn't finish: ${status.message}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = onRunVerification) {
+                        Text("Retry")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QualityInfoRefreshSection(onClick: () -> Unit) {
+    val context = LocalContext.current
+    SectionHeader(title = "Quality info")
+    GlassCard {
+        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+            Text(
+                text = "Refresh quality info",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "Re-extract bit-depth + sample-rate for FLAC tracks where it's missing. " +
+                    "Runs in the background.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            Button(
+                onClick = {
+                    onClick()
+                    android.widget.Toast.makeText(
+                        context,
+                        "Refreshing quality info — running in background.",
+                        android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                },
+            ) {
+                Text("Refresh")
+            }
+        }
+    }
+}
+
+@Composable
+private fun FlacUpgradeSection(
+    state: FlacUpgradeUiState,
+    onRun: () -> Unit,
+) {
+    SectionHeader(title = "FLAC upgrades")
+    GlassCard {
+        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+            Text(
+                text = "Look for lossless versions of downloaded tracks that aren't FLAC yet. " +
+                    "Keeps running in the background. To run this after every sync, " +
+                    "turn it on in Audio & Quality.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            state.message?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.height(4.dp))
+            }
+            state.detail?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(4.dp))
+            }
+            Spacer(Modifier.height(4.dp))
+            if (state.active) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            } else {
+                Button(onClick = onRun) { Text("Check for upgrades") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LyricsFetchSection(
+    status: LyricsFetchStatus,
+    onFetch: () -> Unit,
+) {
+    SectionHeader(title = "Lyrics")
+    GlassCard {
+        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+            when (status) {
+                LyricsFetchStatus.Idle, LyricsFetchStatus.Queued -> {
+                    Text(
+                        text = "Fetch lyrics",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = if (status == LyricsFetchStatus.Queued) {
+                            "Queued, waiting for a suitable connection. Tap to start now on any network."
+                        } else {
+                            "Look up lyrics for downloaded tracks that are missing them. " +
+                                "Keeps running in the background, so you can leave the app. " +
+                                "A notification shows progress."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Button(onClick = onFetch) { Text("Fetch lyrics") }
+                }
+                is LyricsFetchStatus.Running -> {
+                    Text(
+                        text = if (status.total > 0) {
+                            "Fetching lyrics… ${status.done} / ${status.total}"
+                        } else {
+                            "Fetching lyrics…"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    if (status.total > 0) {
+                        LinearProgressIndicator(
+                            progress = { status.done.toFloat() / status.total.toFloat() },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                }
+                is LyricsFetchStatus.Done -> {
+                    val updated = status.fetched + status.upgraded
+                    Text(
+                        text = if (updated > 0) {
+                            "Done: $updated ${if (updated == 1) "track" else "tracks"} updated."
+                        } else {
+                            "Done: nothing needed updating."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    if (status.notFound > 0) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = "No lyrics found for ${status.notFound} " +
+                                "${if (status.notFound == 1) "track" else "tracks"}.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (status.bailed) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = "Stopped early: the lyrics service isn't responding. Try again in a bit.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Button(onClick = onFetch) { Text("Fetch again") }
+                }
+            }
+        }
+    }
+}
+
+private fun humanizeFormat(format: String): String = when (format.lowercase()) {
+    "aac" -> "AAC"
+    "opus" -> "Opus"
+    "mp3" -> "MP3"
+    "flac" -> "FLAC"
+    "vorbis" -> "Vorbis"
+    "unknown" -> "Unknown"
+    else -> format
+}

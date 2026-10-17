@@ -21,7 +21,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Stash"
+rootProject.name = "LUMA"
 
 include(":app")
 

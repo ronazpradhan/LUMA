@@ -1,0 +1,958 @@
+package com.luma.feature.home
+
+import com.luma.core.ui.components.LocalBottomChromePadding
+import androidx.compose.animation.core.EaseInOut
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.animateColor
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.MarqueeSpacing
+import androidx.compose.foundation.basicMarquee
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import com.luma.core.ui.theme.SpaceGrotesk
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.PlaylistAdd
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.DownloadDone
+import androidx.compose.material.icons.filled.RemoveCircleOutline
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.withFrameMillis
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.luma.core.data.mix.MixBuildState
+import com.luma.core.model.MusicSource
+import com.luma.core.model.Playlist
+import com.luma.core.model.PlaylistType
+import com.luma.core.model.Track
+import com.luma.core.ui.components.AlbumSquareCard
+import com.luma.core.ui.components.CardRail
+import com.luma.core.ui.components.CrispChipRow
+import com.luma.core.data.prefs.HomeSection
+import com.luma.core.ui.components.DiscoverHeroCard
+import com.luma.core.ui.components.GlassCard
+import com.luma.core.ui.components.RankedAlbumList
+import com.luma.core.ui.components.RankedAlbumUi
+import com.luma.core.ui.components.SectionHeader
+import com.luma.core.ui.components.SourceIndicator
+import com.luma.data.ytmusic.model.AlbumSummary
+import com.luma.data.ytmusic.model.PlaylistSummary
+import com.luma.core.ui.theme.LocalIsDarkTheme
+import androidx.compose.ui.layout.ContentScale
+import coil3.compose.AsyncImage
+import com.luma.core.ui.theme.LumaTheme
+import com.luma.core.common.extensions.pluralize
+
+/**
+ * How many mixes a Home rail shows before "See all".
+ *
+ * The rails were uncapped, so a synced library put ~120 cards into three
+ * horizontal lists nobody scrolls to the end of — the tail was unreachable in
+ * practice and cost layout on every recomposition. Capped here at the render
+ * site and NOT in the ViewModel on purpose: MixBrowseScreen ("See all") reads
+ * the same uiState lists, and capping upstream would truncate the full grid too.
+ */
+private const val HOME_RAIL_LIMIT = 12
+
+/** LUMA has no lossless audio; keeps the upstream lossless UI switched off. */
+private const val LUMA_LOSSLESS = false
+
+/**
+ * Home screen composable displaying a premium dark dashboard with sync
+ * status, daily mixes, recently added tracks, liked songs, and playlists.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun HomeScreen(
+    modifier: Modifier = Modifier,
+    onNavigateToSettings: () -> Unit = {},
+    onNavigateToPlaylist: (Long) -> Unit = {},
+    onNavigateToLibrary: () -> Unit = {},
+    onNavigateToAlbum: (AlbumSummary) -> Unit = {},
+    onSeeAllPlaylists: (String) -> Unit = {},
+    onNavigateToMixBuilder: (Long?) -> Unit = {},
+    // Task 7 wires the actual mix-browse destination; today a no-op from the host.
+    onSeeAllMixes: (MixRail) -> Unit = {},
+    onReportIssue: () -> Unit = {},
+    onShareMix: (Long) -> Unit = {},
+    /** Community's section, from feature/community; the app fills it (spec 2026-09-26 §3). */
+    communitySection: @Composable () -> Unit = {},
+    viewModel: HomeViewModel = hiltViewModel(),
+    ytFeedViewModel: YouTubeHomeFeedViewModel = hiltViewModel(),
+) {
+    // Long-pressed LUMA mix whose action sheet is open (null = closed).
+    var actionSheetMixId by remember { mutableStateOf<Long?>(null) }
+    // Long-pressed "Your playlists" card → Open / Play All / Remove from Home.
+    var pinnedSheetPlaylistId by remember { mutableStateOf<Long?>(null) }
+    // Opening a mix = open its materialized playlist + freshen it if stale.
+    // A HomeMix's id IS its playlist id, so this reuses the existing playlist nav.
+    val openMix: (Long) -> Unit = { id ->
+        viewModel.refreshMixIfStale(id)
+        onNavigateToPlaylist(id)
+    }
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val ytShelves by ytFeedViewModel.shelves.collectAsStateWithLifecycle()
+    val anyServiceConnected by ytFeedViewModel.anyServiceConnected.collectAsStateWithLifecycle()
+
+
+    val toastContext = LocalContext.current
+    LaunchedEffect(Unit) {
+        viewModel.userMessages.collect { msg ->
+            android.widget.Toast.makeText(toastContext, msg, android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // LUMA: pull down to refresh Home (the YouTube Music feed).
+    val ytRefreshing by ytFeedViewModel.refreshing.collectAsStateWithLifecycle()
+    androidx.compose.material3.pulltorefresh.PullToRefreshBox(
+        isRefreshing = ytRefreshing,
+        onRefresh = { ytFeedViewModel.refresh(userPulled = true) },
+        modifier = modifier
+            .fillMaxSize()
+            .statusBarsPadding(),
+    ) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        // LUMA: Home scrolls under the glass bottom chrome.
+        contentPadding = PaddingValues(bottom = 24.dp + LocalBottomChromePadding.current),
+    ) {
+        // ── App title row: wordmark + social icons ────────────────────
+        // v0.9.13: empty space to the right of the wordmark holds quick
+        // links to the project (GitHub, X). Supporter pill moves back
+        // to its own full-width row below.
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                val isDark = LocalIsDarkTheme.current
+                Image(
+                    painter = painterResource(
+                        id = if (isDark) R.drawable.wordmark_luma_dark
+                        else R.drawable.wordmark_luma_light,
+                    ),
+                    contentDescription = "LUMA",
+                    modifier = Modifier.height(48.dp),
+                )
+                Spacer(modifier = Modifier.weight(1f))
+
+                // LUMA: no Stream / Download mode pill; the saved mode stays as it is.
+                // LUMA: Settings lives here now, not in the tab bar.
+                androidx.compose.material3.IconButton(
+                    onClick = onNavigateToSettings,
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Settings,
+                        contentDescription = "Settings",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        // ── Lossless connect nudge ───────────────────────────────────
+        // Shown when the user has lossless toggled OFF and hasn't
+        // dismissed. Tap routes to Settings; X dismisses forever.
+        // Stacks below the Last.fm banner if both apply.
+        // LUMA: no lossless, so neither lossless banner is shown.
+        uiState.losslessPrompt?.takeIf { LUMA_LOSSLESS }?.let {
+            item {
+                Spacer(Modifier.height(6.dp))
+                LosslessConnectBanner(
+                    onSetUp = {
+                        viewModel.requestSettingsLosslessFocus()
+                        onNavigateToSettings()
+                    },
+                    onDismiss = viewModel::dismissLosslessBanner,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+            }
+        }
+
+        // ── Lossless offline ─────────────────────────────────────────
+        // Shown while lossless is ON, the shared path looks dead and
+        // the user owns no lossless source of their own — the one
+        // moment connecting an account is the difference between FLAC
+        // and a silent YouTube fallback. Tap opens Settings › Audio;
+        // X declines forever.
+        if (LUMA_LOSSLESS && uiState.showLosslessOffline) {
+            item {
+                Spacer(Modifier.height(6.dp))
+                LosslessOfflineBanner(
+                    onConnect = {
+                        viewModel.requestSettingsLosslessFocus()
+                        onNavigateToSettings()
+                    },
+                    onDismiss = viewModel::dismissLosslessOffline,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+            }
+        }
+
+        // ── Re-tagging library (metadata backfill progress) ──────────
+        // v0.9.35: surfaces MetadataBackfillWorker progress on upgrade
+        // so users know why disk IO / yt-dlp activity is happening. The
+        // banner renders Hidden in the steady state (post-backfill); the
+        // 2-second "Done" pulse self-acks via LaunchedEffect inside the
+        // composable.
+        if (uiState.metadataBackfillBanner !is com.luma.feature.home.banner.MetadataBackfillBannerState.Hidden) {
+            item {
+                Spacer(Modifier.height(6.dp))
+                com.luma.feature.home.banner.MetadataBackfillBanner(
+                    state = uiState.metadataBackfillBanner,
+                    onFinishedAcknowledged = viewModel::onMetadataBackfillFinishedAcknowledged,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+            }
+        }
+
+        // ── Your-mix pager (mixes you built in the Mix Builder) ──
+        // LUMA: Daily Discover is gone and suggestions live in the "Suggested
+        // for you" row below, so this pager only holds your own mixes; it
+        // disappears when you have none. Long-press a page for its action sheet.
+        item {
+            val mixPages = uiState.yourMixes
+            when {
+                // Only on a truly empty Home: once the feed or suggestions have loaded, it is just noise.
+                uiState.showColdStartCard && !anyServiceConnected && ytShelves.isEmpty() -> {
+                    Spacer(Modifier.height(6.dp))
+                    PersonalizeCard(
+                        onConnect = onNavigateToSettings,
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                    )
+                }
+                mixPages.isEmpty() -> Unit
+                else -> {
+                    val pageCount = mixPages.size
+                    val pagerState = androidx.compose.foundation.pager.rememberPagerState(
+                        pageCount = { pageCount },
+                    )
+                    Column(modifier = Modifier.padding(top = 6.dp)) {
+                        androidx.compose.foundation.pager.HorizontalPager(
+                            state = pagerState,
+                            contentPadding = PaddingValues(horizontal = 16.dp),
+                            pageSpacing = 10.dp,
+                        ) { page ->
+                            val m = mixPages[page]
+                            DiscoverHeroCard(
+                                label = "Your mix",
+                                title = m.title,
+                                subtitle = when (m.buildState) {
+                                    MixBuildState.BUILDING -> "building…"
+                                    MixBuildState.EMPTY -> "empty — edit to fill"
+                                    else -> pluralize(m.trackCount, "track")
+                                },
+                                artUrl = m.artUrl,
+                                onPlay = { viewModel.playMix(m.id) },
+                                onOpen = { openMix(m.id) },
+                                onLongPress = { actionSheetMixId = m.id },
+                            )
+                        }
+                        if (pageCount > 1) {
+                            Spacer(Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.Center,
+                            ) {
+                                repeat(pageCount) { i ->
+                                    val active = pagerState.currentPage == i
+                                    Box(
+                                        modifier = Modifier
+                                            .padding(horizontal = 3.dp)
+                                            .size(6.dp)
+                                            .clip(CircleShape)
+                                            .background(
+                                                if (active) {
+                                                    MaterialTheme.colorScheme.primary
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
+                                                },
+                                            ),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── User-arranged sections (Settings > Appearance > Home layout) ──
+        // Order + visibility come from uiState.sections. The genre chips
+        // steer only the Qobuz rows, so they ride glued above the FIRST
+        // visible Qobuz section wherever the user placed it — and the old
+        // chips→header seam (16dp spacer stacked on the header's 12dp
+        // padding, 28dp of blank) tightens to 2dp + 12dp for that row.
+        val firstQobuzSection = uiState.sections.firstOrNull {
+            it == HomeSection.NEW_RELEASES ||
+                it == HomeSection.QOBUZ_PLAYLISTS ||
+                it == HomeSection.TOP_ALBUMS
+        }
+        uiState.sections.forEach { section ->
+            val chipsLead = uiState.qobuzDiscoveryEnabled && section == firstQobuzSection
+            if (chipsLead) {
+                item(key = "section_genre_chips") {
+                    Spacer(Modifier.height(14.dp))
+                    CrispChipRow(
+                        chips = uiState.genres.map { it.label },
+                        selected = uiState.selectedGenre,
+                        onSelect = viewModel::onSelectGenre,
+                    )
+                }
+            }
+            when (section) {
+                HomeSection.YOUTUBE_FEED -> ytShelves.forEachIndexed { i, shelf ->
+                    item(key = "section_yt_feed_$i") {
+                        CardRail(title = shelf.title) {
+                            items(shelf.items.take(20)) { tile ->
+                                MixRailCard(
+                                    title = tile.title,
+                                    artUrl = tile.thumbnailUrl,
+                                    source = MusicSource.YOUTUBE,
+                                    onClick = {
+                                        if (tile is com.luma.data.ytmusic.model.YTHomeItem.Album) {
+                                            onNavigateToAlbum(tile.album)
+                                        } else {
+                                            ytFeedViewModel.play(tile)
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+                HomeSection.YOUR_PLAYLISTS ->
+                    if (uiState.yourPlaylists.isNotEmpty() || uiState.likedCard != null) {
+                        item(key = "section_your_playlists") {
+                            CardRail(title = "Your playlists") {
+                                uiState.likedCard?.let { liked ->
+                                    item(key = "liked_card") {
+                                        LikedHomeCard(
+                                            trackCount = liked.trackCount,
+                                            onClick = {
+                                                viewModel.requestLibraryLikedFocus()
+                                                onNavigateToLibrary()
+                                            },
+                                        )
+                                    }
+                                }
+                                items(uiState.yourPlaylists.railCut(HOME_RAIL_LIMIT), key = { it.id }) { p ->
+                                    MixRailCard(
+                                        title = p.title, artUrl = p.artUrl, source = p.source,
+                                        onClick = { onNavigateToPlaylist(p.id) },
+                                        onLongPress = { pinnedSheetPlaylistId = p.id },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                HomeSection.NEW_RELEASES -> if (uiState.newReleases.isNotEmpty()) {
+                    item(key = "section_new_releases") {
+                        DiscoveryAlbumRow(
+                            title = "New Releases",
+                            albums = uiState.newReleases,
+                            onOpen = onNavigateToAlbum,
+                            topSpacing = if (chipsLead) 2.dp else 16.dp,
+                        )
+                    }
+                }
+                HomeSection.QOBUZ_PLAYLISTS -> if (uiState.playlists.isNotEmpty()) {
+                    item(key = "section_qobuz_playlists") {
+                        DiscoveryPlaylistRow(
+                            title = "Qobuz Playlists",
+                            playlists = uiState.playlists,
+                            onOpen = onNavigateToAlbum,
+                            onSeeAll = { onSeeAllPlaylists(uiState.selectedGenre) },
+                            topSpacing = if (chipsLead) 2.dp else 16.dp,
+                        )
+                    }
+                }
+                HomeSection.TOP_ALBUMS -> if (uiState.topAlbums.isNotEmpty()) {
+                    item(key = "section_top_albums") {
+                        // Collapsed to the top 5 by default; "Show all N" expands the
+                        // full best-sellers chart in place. Saveable so the choice
+                        // survives the item scrolling out of composition.
+                        var topAlbumsExpanded by rememberSaveable { mutableStateOf(false) }
+                        val visibleTop =
+                            if (topAlbumsExpanded) uiState.topAlbums else uiState.topAlbums.take(5)
+                        Column {
+                            Spacer(Modifier.height(if (chipsLead) 2.dp else 16.dp))
+                            SectionHeader(
+                                title = "Top Albums",
+                                actionText = when {
+                                    uiState.topAlbums.size <= 5 -> null
+                                    topAlbumsExpanded -> "Show less"
+                                    else -> "Show all ${uiState.topAlbums.size}"
+                                },
+                                onActionClick = { topAlbumsExpanded = !topAlbumsExpanded },
+                            )
+                            RankedAlbumList(
+                                items = visibleTop.mapIndexed { i, a ->
+                                    RankedAlbumUi(
+                                        rank = i + 1,
+                                        title = a.title,
+                                        artist = a.artist,
+                                        artUrl = a.thumbnailUrl,
+                                        movement = null,   // Qobuz best-sellers carries no chart delta
+                                    )
+                                },
+                                onClick = { ranked -> onNavigateToAlbum(uiState.topAlbums[ranked.rank - 1]) },
+                            )
+                        }
+                    }
+                }
+                HomeSection.MADE_FOR_YOU -> if (uiState.madeForYou.isNotEmpty()) {
+                    item(key = "section_made_for_you") {
+                        CardRail(
+                            title = "Made for you",
+                            actionText = "See all",
+                            onActionClick = { onSeeAllMixes(MixRail.MADE_FOR_YOU) },
+                        ) {
+                            items(uiState.madeForYou.railCut(HOME_RAIL_LIMIT), key = { it.id }) { m ->
+                                MixRailCard(
+                                    title = m.title, artUrl = m.artUrl, source = m.source,
+                                    buildState = m.buildState, onClick = { openMix(m.id) },
+                                    onLongPress = { actionSheetMixId = m.id },
+                                )
+                            }
+                        }
+                    }
+                }
+                HomeSection.RADIOS -> if (uiState.radios.isNotEmpty()) {
+                    item(key = "section_radios") {
+                        CardRail(
+                            title = "Radios",
+                            actionText = "See all",
+                            onActionClick = { onSeeAllMixes(MixRail.RADIOS) },
+                        ) {
+                            items(uiState.radios.railCut(HOME_RAIL_LIMIT), key = { it.id }) { m ->
+                                MixRailCard(
+                                    title = m.title, artUrl = m.artUrl, source = m.source,
+                                    buildState = m.buildState, onClick = { openMix(m.id) },
+                                    onLongPress = { actionSheetMixId = m.id },
+                                )
+                            }
+                        }
+                    }
+                }
+                HomeSection.MOOD_DECADES -> if (uiState.moodDecades.isNotEmpty()) {
+                    item(key = "section_mood_decades") {
+                        CardRail(
+                            title = "Mood & decades",
+                            actionText = "See all",
+                            onActionClick = { onSeeAllMixes(MixRail.MOOD_DECADES) },
+                        ) {
+                            items(uiState.moodDecades.railCut(HOME_RAIL_LIMIT), key = { it.id }) { m ->
+                                MixRailCard(
+                                    title = m.title, artUrl = m.artUrl, source = m.source,
+                                    buildState = m.buildState, onClick = { openMix(m.id) },
+                                    onLongPress = { actionSheetMixId = m.id },
+                                )
+                            }
+                        }
+                    }
+                }
+                HomeSection.COMMUNITY -> Unit // LUMA: no Community on Home
+            }
+        }
+
+    }
+    }
+
+    // ── LUMA-mix action sheet (long-press a "Your mixes" card) ──────────
+    // Moved from LibraryMixesSection (Library keeps its own copy until Task 8).
+    // Gating mirrors Library: Refresh for every LUMA mix, Edit/Delete for
+    // custom mixes only, Open always. "Your mixes" == the LUMA_MIX rail, so
+    // membership there stands in for the type == LUMA_MIX check.
+    actionSheetMixId?.let { id ->
+        // Guard render only — a stale id (mix vanished from every rail after a
+        // delete/refresh re-emit) simply renders nothing; the next long-press
+        // overwrites it. No state write during composition.
+        val mix = (uiState.madeForYou + uiState.radios + uiState.moodDecades + uiState.yourMixes)
+            .firstOrNull { it.id == id }
+        if (mix != null) {
+            val sheetState = rememberModalBottomSheetState()
+            val isLumaMix = uiState.yourMixes.any { it.id == id }
+            val isCustom = id in uiState.customMixPlaylistIds
+            ModalBottomSheet(
+                onDismissRequest = { actionSheetMixId = null },
+                sheetState = sheetState,
+                containerColor = MaterialTheme.colorScheme.surface,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp)
+                        .padding(bottom = 8.dp),
+                ) {
+                    Text(
+                        text = mix.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                if (isLumaMix) {
+                    MixActionRow(
+                        icon = Icons.Default.Refresh,
+                        label = "Refresh this mix",
+                        onClick = {
+                            viewModel.refreshMix(id)
+                            actionSheetMixId = null
+                        },
+                    )
+                }
+                if (isCustom) {
+                    MixActionRow(
+                        icon = Icons.Default.Edit,
+                        label = "Edit mix",
+                        onClick = {
+                            viewModel.editRecipeId(id) { recipeId -> onNavigateToMixBuilder(recipeId) }
+                            actionSheetMixId = null
+                        },
+                    )
+                    MixActionRow(
+                        icon = Icons.Default.Delete,
+                        label = "Delete mix",
+                        tint = MaterialTheme.colorScheme.error,
+                        onClick = {
+                            viewModel.deleteCustomMix(id)
+                            actionSheetMixId = null
+                        },
+                    )
+                }
+                MixActionRow(
+                    icon = Icons.Filled.RemoveCircleOutline,
+                    label = "Hide from Home",
+                    onClick = {
+                        viewModel.setHideFromHome(id, true)
+                        actionSheetMixId = null
+                    },
+                )
+                MixActionRow(
+                    icon = Icons.Default.PlayArrow,
+                    label = "Open",
+                    onClick = {
+                        openMix(id)
+                        actionSheetMixId = null
+                    },
+                )
+                MixActionRow(
+                    icon = Icons.Default.Share,
+                    label = "Share mix",
+                    onClick = {
+                        onShareMix(id)
+                        actionSheetMixId = null
+                    },
+                )
+                Spacer(Modifier.height(12.dp))
+            }
+        }
+    }
+
+    // ── Pinned-playlist action sheet (long-press a "Your playlists" card) ──
+    pinnedSheetPlaylistId?.let { id ->
+        // Guard render only — a stale id (playlist unpinned/deleted after a
+        // re-emit) renders nothing; the next long-press overwrites it.
+        val pinned = uiState.yourPlaylists.firstOrNull { it.id == id }
+        if (pinned != null) {
+            val sheetState = rememberModalBottomSheetState()
+            ModalBottomSheet(
+                onDismissRequest = { pinnedSheetPlaylistId = null },
+                sheetState = sheetState,
+                containerColor = MaterialTheme.colorScheme.surface,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp)
+                        .padding(bottom = 8.dp),
+                ) {
+                    Text(
+                        text = pinned.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                MixActionRow(
+                    icon = Icons.AutoMirrored.Filled.ArrowForward,
+                    label = "Open",
+                    onClick = {
+                        pinnedSheetPlaylistId = null
+                        onNavigateToPlaylist(id)
+                    },
+                )
+                MixActionRow(
+                    icon = Icons.Default.PlayArrow,
+                    label = "Play All",
+                    onClick = {
+                        pinnedSheetPlaylistId = null
+                        viewModel.playMix(id)
+                    },
+                )
+                MixActionRow(
+                    icon = Icons.Filled.RemoveCircleOutline,
+                    label = "Remove from Home",
+                    onClick = {
+                        pinnedSheetPlaylistId = null
+                        viewModel.setPinnedToHome(id, pinned = false)
+                    },
+                )
+                Spacer(Modifier.height(12.dp))
+            }
+        }
+    }
+
+}
+
+// ── Mix action-sheet row ──────────────────────────────────────────────────
+
+/** A single action row inside the LUMA-mix action sheet. */
+@Composable
+private fun MixActionRow(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    tint: Color = MaterialTheme.colorScheme.onSurface,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = tint,
+            modifier = Modifier.size(24.dp),
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyLarge,
+            color = tint,
+        )
+    }
+}
+
+// ── Lossless connect banner ──────────────────────────────────────────────
+
+/**
+ * "Try lossless audio" Home banner. Shows when the user has
+ * lossless turned off (explicit save, since v0.9.8 fresh installs
+ * default to ON) and hasn't dismissed. Tapping routes to Settings,
+ * where the existing Audio Quality card hosts the toggle + captcha
+ * setup flow.
+ */
+@Composable
+private fun LosslessConnectBanner(
+    onSetUp: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val accent = MaterialTheme.colorScheme.tertiary
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = accent.copy(alpha = 0.10f),
+        shape = RoundedCornerShape(12.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, accent.copy(alpha = 0.35f)),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onSetUp)
+                .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Try lossless audio",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = "Studio-quality FLAC downloads via Qobuz. Tap to set up.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                text = "Set up →",
+                style = MaterialTheme.typography.labelSmall,
+                color = accent,
+            )
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onDismiss),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Dismiss lossless banner",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * "No lossless right now" banner. Same visual grammar as
+ * [LosslessConnectBanner] but on the error accent: this one isn't an
+ * upsell, it's a repair — the user asked for lossless and isn't getting
+ * it, and one tap starts fixing that.
+ *
+ * The copy deliberately does NOT say anything broke. The state that fires
+ * this banner is usually the day-one one — lossless on by default, nothing
+ * ever connected — which is the same state Settings › Audio reports as
+ * "No lossless source configured".
+ *
+ * The two surfaces agree on the states that matter, but they are NOT the same
+ * predicate, deliberately: Home keys on `LosslessAvailability.anyUserOwned`
+ * (BYO login || custom endpoint) so a dead PUBLIC relay cannot hide the
+ * "connect your own account" offer — that outage is what the banner is for.
+ * Settings keys on `qbdlxExpired` (!qbdlxEnabled: BYO login || custom
+ * endpoint || a config relay), which counts relays. So they diverge on exactly one case:
+ * a user with nothing but a public config relay still gets this banner, and
+ * should — Home asks "is there anything of yours to connect?", Settings asks
+ * "is what you configured still a path?".
+ */
+@Composable
+private fun LosslessOfflineBanner(
+    onConnect: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val accent = MaterialTheme.colorScheme.error
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = accent.copy(alpha = 0.10f),
+        shape = RoundedCornerShape(12.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, accent.copy(alpha = 0.35f)),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onConnect)
+                .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "No lossless right now",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = "LUMA is falling back to lossy audio. " +
+                        "Connect your own Qobuz account for FLAC.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                text = "Connect →",
+                style = MaterialTheme.typography.labelSmall,
+                color = accent,
+            )
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onDismiss),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Dismiss lossless-offline banner",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+    }
+}
+
+
+// \u2500\u2500 Qobuz discovery rows \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+/** Horizontal carousel of Qobuz albums (New Releases). Tap \u2192 album detail. */
+@Composable
+private fun DiscoveryAlbumRow(
+    title: String,
+    albums: List<AlbumSummary>,
+    onOpen: (AlbumSummary) -> Unit,
+    topSpacing: androidx.compose.ui.unit.Dp = 16.dp,
+) {
+    Column {
+        Spacer(Modifier.height(topSpacing))
+        SectionHeader(title = title)
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            items(albums) { album ->
+                AlbumSquareCard(
+                    title = album.title,
+                    artist = album.artist,
+                    thumbnailUrl = album.thumbnailUrl,
+                    year = album.year,
+                    isLossless = true,
+                    onClick = { onOpen(album) },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Horizontal carousel of Qobuz community playlists. Each card carries the
+ * curator as its subtitle and opens via a QOBUZ_PLAYLIST [AlbumSummary] so the
+ * existing album-detail screen renders + plays it.
+ */
+@Composable
+private fun DiscoveryPlaylistRow(
+    title: String,
+    playlists: List<PlaylistSummary>,
+    onOpen: (AlbumSummary) -> Unit,
+    onSeeAll: () -> Unit,
+    topSpacing: androidx.compose.ui.unit.Dp = 16.dp,
+) {
+    Column {
+        Spacer(Modifier.height(topSpacing))
+        SectionHeader(title = title, actionText = "See all", onActionClick = onSeeAll)
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            items(playlists) { playlist ->
+                AlbumSquareCard(
+                    title = playlist.title,
+                    // Curator is always the regional Qobuz account ("Qobuz France")
+                    // — redundant on every card, so show the track count instead.
+                    artist = pluralize(playlist.trackCount, "track"),
+                    thumbnailUrl = playlist.thumbnailUrl,
+                    year = null,
+                    isLossless = true,
+                    onClick = { onOpen(playlist.toAlbumNav()) },
+                )
+            }
+        }
+    }
+}
+

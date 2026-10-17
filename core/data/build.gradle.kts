@@ -1,11 +1,11 @@
 plugins {
-    id("stash.android.library")
+    id("luma.android.library")
     alias(libs.plugins.hilt)
     alias(libs.plugins.ksp)
     alias(libs.plugins.kotlin.serialization)
 }
 android {
-    namespace = "com.stash.core.data"
+    namespace = "com.luma.core.data"
 
     // MigrationTestHelper reads schema JSONs from test assets so
     // runMigrationsAndValidate can compare the migrated DB to the target

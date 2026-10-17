@@ -1,9 +1,9 @@
 plugins {
-    id("stash.android.feature")
+    id("luma.android.feature")
 }
 
 android {
-    namespace = "com.stash.feature.nowplaying"
+    namespace = "com.luma.feature.nowplaying"
 
     testOptions {
         unitTests {

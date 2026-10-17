@@ -1,10 +1,10 @@
 plugins {
-    id("stash.android.library")
+    id("luma.android.library")
     alias(libs.plugins.hilt)
     alias(libs.plugins.ksp)
 }
 android {
-    namespace = "com.stash.core.network"
+    namespace = "com.luma.core.network"
     buildFeatures { buildConfig = true }
 }
 dependencies {

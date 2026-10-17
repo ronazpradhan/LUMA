@@ -21,6 +21,6 @@
         <intent
             android:action="android.intent.action.VIEW"
             android:targetPackage="com.luma.music"
-            android:targetClass="com.stash.app.ResumePlaybackActivity" />
+            android:targetClass="com.luma.app.ResumePlaybackActivity" />
     </shortcut>
 </shortcuts>

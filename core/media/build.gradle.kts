@@ -1,5 +1,5 @@
 plugins {
-    id("stash.android.library")
+    id("luma.android.library")
     alias(libs.plugins.hilt)
     alias(libs.plugins.ksp)
     // Compose compiler plugin required for compose-ui-graphics Color usage in ColorExtractor.
@@ -8,7 +8,7 @@ plugins {
 }
 
 android {
-    namespace = "com.stash.core.media"
+    namespace = "com.luma.core.media"
 
     buildFeatures {
         compose = true

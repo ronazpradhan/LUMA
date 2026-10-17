@@ -1,0 +1,95 @@
+package com.luma.core.network.di
+
+import dagger.Binds
+import dagger.Module
+import dagger.Provides
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+import dagger.multibindings.IntoSet
+import dagger.multibindings.Multibinds
+import okhttp3.ConnectionSpec
+import okhttp3.Interceptor
+import okhttp3.OkHttpClient
+import okhttp3.logging.HttpLoggingInterceptor
+import java.util.concurrent.TimeUnit
+import javax.inject.Singleton
+
+/**
+ * Hilt module that provides networking dependencies shared across all modules.
+ *
+ * The [OkHttpClient] singleton is configured with sensible timeouts, a logging
+ * interceptor (body-level in debug builds, none in release), and enforced
+ * TLS 1.2+ via [ConnectionSpec.MODERN_TLS] to prevent cipher-downgrade attacks.
+ *
+ * **Certificate pinning note:** Full certificate pinning with SHA-256 pin hashes
+ * for Spotify / YouTube endpoints is a future enhancement. Pinned hashes must be
+ * rotated whenever the service rotates its leaf or intermediate certificates,
+ * which risks hard-locking users out of the app if an update is missed. For now,
+ * MODERN_TLS ensures only strong cipher suites and TLS 1.2+ are negotiated.
+ */
+@Module
+@InstallIn(SingletonComponent::class)
+object NetworkModule {
+
+    private const val TIMEOUT_SECONDS = 30L
+
+    @Provides
+    @Singleton
+    fun provideOkHttpClient(
+        appInterceptors: Set<@JvmSuppressWildcards Interceptor>,
+    ): OkHttpClient {
+        val loggingInterceptor = HttpLoggingInterceptor().apply {
+            level = if (com.luma.core.network.BuildConfig.DEBUG) {
+                HttpLoggingInterceptor.Level.BASIC
+            } else {
+                HttpLoggingInterceptor.Level.NONE
+            }
+            redactHeader("Authorization")
+            redactHeader("Cookie")
+            redactHeader("X-Stash-Edit-Key")
+            redactHeader("X-Stash-Community-Key")
+        }
+
+        return OkHttpClient.Builder()
+            .connectionSpecs(listOf(ConnectionSpec.MODERN_TLS))
+            // Survive the device resolver failing under the sync's 8-way download
+            // burst (UnknownHostException for several simultaneous lookups of the
+            // same host, while single requests resolve fine — the reason downloads
+            // "fell flat" while streaming worked). Caches + coalesces + retries.
+            .dns(com.luma.core.network.dns.ResilientDns())
+            .connectTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .readTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .writeTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .addInterceptor(loggingInterceptor)
+            .apply { appInterceptors.forEach { addInterceptor(it) } }
+            .build()
+    }
+}
+
+/**
+ * Declares the multibinding consumed by [NetworkModule.provideOkHttpClient].
+ *
+ * Lives in a separate interface module because [NetworkModule] is an `object`
+ * and cannot host the abstract `@Multibinds` method.
+ */
+@Module
+@InstallIn(SingletonComponent::class)
+interface NetworkInterceptorsModule {
+    /**
+     * Walks a 404'd cover down to a variant that exists. Bound here
+     * rather than at a call site because the client is shared: Coil and
+     * media3's bitmap loader both need it, and neither knows about the other.
+     */
+    @Binds
+    @IntoSet
+    fun artFallback(
+        interceptor: com.luma.core.network.art.ArtFallbackInterceptor,
+    ): Interceptor
+
+    /**
+     * App-contributed OkHttp interceptors installed on the shared client.
+     * Resolves to an empty set when nothing contributes.
+     */
+    @Multibinds
+    fun appInterceptors(): Set<@JvmSuppressWildcards Interceptor>
+}

@@ -1,13 +1,13 @@
-# Stash ProGuard Rules
+# Luma ProGuard Rules
 
 # ── Attributes ──────────────────────────────────────────────────────────────
 -keepattributes *Annotation*, InnerClasses, Signature, Exceptions, EnclosingMethod
 
 # ── kotlinx.serialization ──────────────────────────────────────────────────
 -dontnote kotlinx.serialization.AnnotationsKt
--keep,includedescriptorclasses class com.stash.**$$serializer { *; }
--keepclassmembers class com.stash.** { *** Companion; }
--keepclasseswithmembers class com.stash.** { kotlinx.serialization.KSerializer serializer(...); }
+-keep,includedescriptorclasses class com.luma.**$$serializer { *; }
+-keepclassmembers class com.luma.** { *** Companion; }
+-keepclasseswithmembers class com.luma.** { kotlinx.serialization.KSerializer serializer(...); }
 -keepattributes RuntimeVisibleAnnotations, AnnotationDefault
 
 # ── Hilt / Dagger ───────────────────────────────────────────────────────────

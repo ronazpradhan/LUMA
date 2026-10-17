@@ -15,7 +15,7 @@
         it. Remove once the root cause is fixed.
     -->
     <application
-        android:name=".StashApplication"
+        android:name=".LumaApplication"
         android:allowBackup="false"
         android:fullBackupContent="false"
         android:extractNativeLibs="true"
@@ -25,11 +25,11 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Stash">
+        android:theme="@style/Theme.Luma">
         <!-- Google Cast (spec docs/superpowers/specs/2026-10-06-google-cast-design.md). -->
         <meta-data
             android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
-            android:value="com.stash.app.cast.StashCastOptionsProvider" />
+            android:value="com.luma.app.cast.LumaCastOptionsProvider" />
         <!--
             No-UI trampoline launched by the "Resume playback" app shortcut
             (and Samsung Bixby Routines). Resumes the last queue and finishes
@@ -49,19 +49,19 @@
             android:taskAffinity=""
             android:theme="@android:style/Theme.NoDisplay" />
         <!--
-            singleTop: a link opened while Stash is showing goes to onNewIntent. With the default mode, Android
-            either stacks a second copy of the app or, when the link matches the one Stash was launched with,
+            singleTop: a link opened while Luma is showing goes to onNewIntent. With the default mode, Android
+            either stacks a second copy of the app or, when the link matches the one Luma was launched with,
             delivers nothing at all (an invite for the session you're in did nothing).
         -->
-        <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:theme="@style/Theme.Stash">
+        <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:theme="@style/Theme.Luma">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
             <!--
-                Share target for importing user audio files into the Stash
+                Share target for importing user audio files into the Luma
                 library. Users can long-press an audio file in their file
-                manager (or other app) and pick Stash from the share sheet;
+                manager (or other app) and pick Luma from the share sheet;
                 MainActivity.onCreate / onNewIntent routes the URIs to the
                 LocalImportCoordinator.
             -->
@@ -86,7 +86,7 @@
             </intent-filter>
             <!--
                 Shared mix, song and Listen Together links (spec 2026-09-23 shared mixes §6, 2026-09-24 listen together). Verified App Links:
-                each host serves /.well-known/assetlinks.json for com.stash.app and .debug. stashfm.app is where links live
+                each host serves /.well-known/assetlinks.json for com.luma.app and .debug. stashfm.app is where links live
                 since 2026-10-03; the old workers.dev host stays so links already shared keep opening (same Worker, keep ShareConfig.HOSTS in sync).
                 /t?… is the long song link, /t/{id} the short one. (The <data> tags of one filter combine, so every path applies to both hosts.)
                 Release order: the Worker must be live on stashfm.app, serving assetlinks.json, BEFORE an app with this host ships.
@@ -113,7 +113,7 @@
                 android:resource="@xml/shortcuts" />
         </activity>
         <receiver
-            android:name="com.stash.core.data.sync.BootReceiver"
+            android:name="com.luma.core.data.sync.BootReceiver"
             android:exported="true"
             android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
             <intent-filter>
@@ -123,7 +123,7 @@
 
         <!--
             Disable the default WorkManager Jetpack Startup initializer so that
-            StashApplication.workManagerConfiguration (backed by HiltWorkerFactory)
+            LumaApplication.workManagerConfiguration (backed by HiltWorkerFactory)
             is used instead. Without this removal, WorkManager initializes itself
             before Hilt can inject the factory and @HiltWorker classes will fail
             to instantiate at runtime.

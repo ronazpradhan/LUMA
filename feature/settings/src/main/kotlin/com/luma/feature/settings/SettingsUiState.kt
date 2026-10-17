@@ -1,0 +1,244 @@
+package com.luma.feature.settings
+
+import com.luma.core.auth.model.AuthState
+import com.luma.core.data.youtube.YouTubeScrobblerHealth
+import com.luma.core.model.DownloadNetworkMode
+import com.luma.core.model.QualityTier
+import com.luma.core.model.ThemeMode
+import com.luma.data.download.lossless.LosslessQualityTier
+import com.luma.feature.settings.components.SquidCaptchaStatus
+
+/**
+ * Immutable UI state for the Settings screen.
+ *
+ * @property spotifyAuthState Current Spotify authentication lifecycle state.
+ * @property youTubeAuthState Current YouTube Music authentication lifecycle state.
+ * @property audioQuality Selected download / streaming quality tier.
+ * @property totalStorageBytes Total bytes occupied by the music library on disk (filesystem walk via [com.luma.data.download.files.LibrarySizeHolder]).
+ * @property totalTracks Number of tracks currently stored in the library.
+ * @property showYouTubeCookieDialog Whether the YouTube cookie input dialog should be visible.
+ * @property showSpotifyCookieDialog Whether the Spotify sp_dc cookie input dialog should be visible.
+ * @property spotifyCookieError Error message to display in the Spotify cookie dialog, or null if none.
+ * @property isSpotifyCookieValidating Whether the sp_dc cookie is currently being validated.
+ * @property youTubeCookieError Error message to display in the YouTube cookie dialog, or null if none.
+ * @property isYouTubeCookieValidating Whether the YouTube cookie is currently being validated.
+ */
+data class SettingsUiState(
+    val spotifyAuthState: AuthState = AuthState.NotConnected,
+    val youTubeAuthState: AuthState = AuthState.NotConnected,
+    val discordAuthState: AuthState = AuthState.NotConnected,
+    val audioQuality: QualityTier = QualityTier.MAX,
+    val themeMode: ThemeMode = ThemeMode.SYSTEM,
+    /** Pure-black (AMOLED) backgrounds whenever the effective theme is dark. */
+    val amoledDark: Boolean = false,
+    /**
+     * Network + power conditions under which LUMA runs background
+     * downloads (LUMA Discover, tag enrichment). Changing this in
+     * Settings re-schedules both workers with new WorkManager constraints.
+     */
+    val downloadNetworkMode: DownloadNetworkMode = DownloadNetworkMode.WIFI_AND_CHARGING,
+    val ytHistoryEnabled: Boolean = false,
+    /**
+     * v0.9.26 — user opt-out for LUMA Mixes (Daily Discover / Deep Cuts /
+     * First Listen). Default true preserves current behavior; flipping off
+     * cancels the discovery / refresh / enrichment workers and hides the
+     * built-in mix playlists from Home / Library. See issues #56, #57.
+     */
+    val lumaMixesEnabled: Boolean = true,
+    /** Qobuz discovery sections on Home (New Releases / Qobuz Playlists /
+     * Top Albums + genre chips). False = Home keeps only mixes + imports. */
+    val qobuzDiscoveryEnabled: Boolean = true,
+    /** Ambient animated background on the Now Playing screen. */
+    val ambientAnimationEnabled: Boolean = true,
+    /** How that background moves: Soft glow (default) or Classic. */
+    val ambientStyle: com.luma.core.data.prefs.AmbientStyle = com.luma.core.data.prefs.AmbientStyle.SOFT_GLOW,
+    /** Full Home-section order (including hidden) + the hidden set —
+     * drives the Settings > Appearance > Home layout editor. */
+    val homeSectionOrder: List<com.luma.core.data.prefs.HomeSection> =
+        com.luma.core.data.prefs.resolveHomeSectionOrder(emptyList()),
+    val homeSectionsHidden: Set<com.luma.core.data.prefs.HomeSection> = emptySet(),
+    /** Merged Liked Songs card on Home's "Your playlists" rail. */
+    val showLikedOnHome: Boolean = false,
+    /** Home's Community section (spec 2026-09-26 §3): its own switch, off by default. */
+    val communityOn: Boolean = false,
+    val ytHistoryHealth: YouTubeScrobblerHealth = YouTubeScrobblerHealth.DISABLED,
+    val ytPendingCount: Int = 0,
+    /**
+     * Master switch for the lossless-source download path
+     * (squid.wtf-proxied Qobuz). On by default as of v0.9.8 — every
+     * track is routed through the registry first and falls back to
+     * yt-dlp only when no source has a confident lossless match (or
+     * the captcha is unverified). Files end up 5–10× larger than Opus.
+     *
+     * Existing v0.9.7 users who explicitly toggled this off keep their
+     * saved `false`; v0.9.7 users who never opened the toggle pick up
+     * the new default (functionally identical to v0.9.7 behaviour
+     * because captcha-unverified silently falls back to yt-dlp/MP3).
+     */
+    val losslessEnabled: Boolean = true,
+    /**
+     * Selected lossless quality tier (CD / Hi-Res / Max). Defaults to HI_RES
+     * which matches [LosslessSourcePreferences]'s stored default. The actual
+     * first-emission from the DataStore flow replaces this within a few ms on
+     * cold start; the default only guards the brief pre-emission window.
+     */
+    val losslessQualityTier: LosslessQualityTier = LosslessQualityTier.HI_RES,
+    /**
+     * Streaming lossless tier requested while on Wi-Fi. Distinct from the
+     * download tier ([losslessQualityTier]); backed by
+     * [com.luma.data.download.prefs.StreamingQualityPreferences.wifiTier].
+     * Defaults to HI_RES (full quality on unmetered transport).
+     */
+    val streamingWifiTier: LosslessQualityTier = LosslessQualityTier.HI_RES,
+    /**
+     * Streaming lossless tier requested while on cellular. Defaults to CD —
+     * the data-saving floor — so metered streaming stays light unless the
+     * user opts up. Backed by
+     * [com.luma.data.download.prefs.StreamingQualityPreferences.cellularTier].
+     */
+    val streamingCellularTier: LosslessQualityTier = LosslessQualityTier.CD,
+    /**
+     * Master "Save Data" override for streaming. When true, callers force
+     * CD on every network regardless of the per-transport tiers. Backed by
+     * [com.luma.data.download.prefs.StreamingQualityPreferences.saveData].
+     */
+    val streamingSaveData: Boolean = false,
+    /**
+     * Manually-pasted `captcha_verified_at` cookie value from
+     * `qobuz.squid.wtf`. Bridges the captcha gate when the user
+     * prefers manual paste over the in-app WebView solver — they
+     * solve ALTCHA in their browser, copy the cookie value, and
+     * paste here. Empty string == not configured.
+     */
+    val squidWtfCaptchaCookie: String = "",
+    /**
+     * Tri-state describing the squid.wtf captcha cookie's liveness,
+     * derived from the cookie value plus `QobuzSource.lastKnownBadCookie`.
+     * Nothing renders this today: squid is parked and the routing rows
+     * come from `LosslessAvailability`. Kept for whenever squid is
+     * unparked, when it again decides the row's label ("active" /
+     * "expired" / "optional") and whether a solver link is offered.
+     *
+     * Why a tri-state instead of `cookie.isNotEmpty()`: the cookie has
+     * a ~30-min sliding-window expiry server-side. Once expired,
+     * QobuzSource records the offending value and `isEnabled()`
+     * returns false until the user re-pastes — but pre-fix the row
+     * still rendered as "active" with no action link, hiding the
+     * solver from the user. See `squidCaptchaStatus` mapping fn.
+     */
+    val squidCaptchaStatus: SquidCaptchaStatus = SquidCaptchaStatus.NotConfigured,
+    val totalStorageBytes: Long = 0,
+    val totalTracks: Int = 0,
+    val showYouTubeCookieDialog: Boolean = false,
+    val showYouTubeWebLogin: Boolean = false,
+    val showSpotifyWebLogin: Boolean = false,
+    val showSpotifyCookieDialog: Boolean = false,
+    val spotifyCookieError: String? = null,
+    val isSpotifyCookieValidating: Boolean = false,
+    val youTubeCookieError: String? = null,
+    val isYouTubeCookieValidating: Boolean = false,
+    val youTubeError: String? = null,
+    val showDiscordWebLogin: Boolean = false,
+    val showDiscordTokenDialog: Boolean = false,
+    val discordTokenError: String? = null,
+    val isDiscordTokenValidating: Boolean = false,
+    /**
+     * User-selected SAF tree URI for external storage (SD card / USB-OTG /
+     * any folder). Null = using the app's internal music directory. When
+     * non-null, new downloads are written there via ContentResolver.
+     */
+    val externalTreeUri: android.net.Uri? = null,
+    /**
+     * Live state of the one-shot "Move existing library" migration. The
+     * Settings UI watches this to render progress, a Done banner, or an
+     * Error message when the user migrates their internal library to an
+     * external SAF target.
+     */
+    val moveLibraryState: com.luma.data.download.files.MoveLibraryState =
+        com.luma.data.download.files.MoveLibraryState.Idle,
+    /**
+     * Folder structure new downloads are filed under (#198/#104). Changing
+     * it does not move files; see [reorganizeLibraryState] for the explicit
+     * relocation pass.
+     */
+    val libraryLayout: com.luma.core.data.prefs.LibraryLayout =
+        com.luma.core.data.prefs.LibraryLayout.DEFAULT,
+    /**
+     * Live state of the one-shot "Reorganize library" pass that relocates
+     * already-downloaded tracks into [libraryLayout]'s structure.
+     */
+    val reorganizeLibraryState: com.luma.data.download.files.ReorganizeLibraryState =
+        com.luma.data.download.files.ReorganizeLibraryState.Idle,
+    /** Last.fm connection state — drives the Settings → Last.fm section. */
+    val lastFmState: LastFmAuthState = LastFmAuthState.NotConfigured,
+    /** True while a manual scrobble-drain is in-flight. */
+    val isScrobbleDraining: Boolean = false,
+    /**
+     * One-shot result of the most recent manual scrobble drain. Non-null
+     * triggers a snackbar; the UI clears it via onClearScrobbleDrainResult.
+     */
+    val scrobbleDrainResult: com.luma.core.data.lastfm.LastFmScrobbler.DrainResult? = null,
+    val autoSaveEnabled: Boolean = false,
+    val autoSaveThreshold: Int = 3,
+    val heartDefaultLuma: Boolean = true,
+    val heartDefaultSpotify: Boolean = true,
+    val heartDefaultYtMusic: Boolean = false,
+    /** v0.9.13: count of tracks auto-saved in the last 7 days, for the diagnostics line. */
+    val autoSavedCountLast7Days: Int = 0,
+    /** v0.9.52 like-mirroring: per-service opt-in (default off), gated behind the warning dialog. */
+    val mirrorLikesSpotify: Boolean = false,
+    val mirrorLikesYtMusic: Boolean = false,
+    /** Non-null while the "I understand" warning dialog is showing for that destination. */
+    val pendingMirrorWarning: com.luma.core.data.social.Destination? = null,
+    /**
+     * v0.9.17: when lossless is on, controls whether yt-dlp is allowed
+     * to take over a track that no lossless source could resolve. When
+     * false (default), the track sits in WAITING_FOR_LOSSLESS until a
+     * source resolves it; when true, yt-dlp picks it up at
+     * [audioQuality]. Only meaningful while [losslessEnabled] is true.
+     */
+    val youtubeFallbackEnabled: Boolean = false,
+    /**
+     * True when at least one crash report exists in `cacheDir/crashes/`.
+     * Drives the enabled state of the "Share latest crash report" button
+     * in the Diagnostics section. Refreshed on every Settings entry by the
+     * ViewModel (see `refreshDiagnostics`); also re-checked after the user
+     * taps share, in case the file was deleted between init and tap.
+     */
+    val hasCrashReport: Boolean = false,
+    /** Current status of the database export/import operation. */
+    val databaseBackupState: DatabaseBackupState = DatabaseBackupState.Idle,
+    /** Whether the import confirmation dialog is showing. */
+    val showImportConfirmation: Boolean = false,
+)
+
+/**
+ * State of a database export or import operation in Settings.
+ */
+sealed interface DatabaseBackupState {
+    data object Idle : DatabaseBackupState
+    data object Exporting : DatabaseBackupState
+    data object Importing : DatabaseBackupState
+    data class Success(val message: String) : DatabaseBackupState
+    data class Error(val message: String) : DatabaseBackupState
+}
+
+/**
+ * Connection state for the Last.fm scrobbler integration.
+ *
+ * - [NotConfigured]: the APK was built without a Last.fm API key / secret.
+ *   UI shows a disabled card explaining the developer setup step.
+ * - [Disconnected]: credentials present, user hasn't auth'd yet.
+ * - [AwaitingAuth]: we requested an auth token and opened the user's
+ *   browser; waiting for the user to tap "Finish connecting" after
+ *   approving on Last.fm's site.
+ * - [Connected]: session key stored; scrobbler is live.
+ * - [Error]: something went wrong. Dismissable back to [Disconnected].
+ */
+sealed interface LastFmAuthState {
+    data object NotConfigured : LastFmAuthState
+    data object Disconnected : LastFmAuthState
+    data class AwaitingAuth(val token: String) : LastFmAuthState
+    data class Connected(val username: String, val pendingScrobbles: Int) : LastFmAuthState
+    data class Error(val message: String) : LastFmAuthState
+}

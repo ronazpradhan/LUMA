@@ -1,0 +1,30 @@
+package com.luma.core.data.lossless
+
+import com.luma.core.model.Track
+import com.luma.core.model.UpgradeResult
+
+/**
+ * v0.9.18: thin abstraction for the Now Playing "Find in FLAC" path.
+ *
+ * Lives in `:core:data` so `:feature:nowplaying` (which depends on
+ * `:core:data` but not `:data:download`) can call the lossless
+ * pipeline. The implementation lives in `:data:download` where it
+ * has access to [com.luma.data.download.DownloadManager].
+ *
+ * Distinct from the sync-time download flow: this entry point
+ * always passes `forced = true` so it ignores the user's global
+ * lossless toggle and `youtubeFallbackEnabled` pref. The user
+ * tapped Find in FLAC; they want a lossless attempt regardless of
+ * their default settings.
+ */
+interface LosslessUpgrader {
+    /** Whether automatic lossless downloads are enabled by the master preference. */
+    suspend fun isLosslessEnabled(): Boolean
+
+    /**
+     * @param sweep true for background batches (the FLAC upgrade worker): the request is
+     *   labelled a download, so the relay serves it only from the day's spare capacity and
+     *   may answer [UpgradeResult.Paced]. A single tap leaves it false and keeps stream priority.
+     */
+    suspend fun upgradeToLossless(track: Track, sweep: Boolean = false): UpgradeResult
+}

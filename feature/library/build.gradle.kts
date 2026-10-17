@@ -1,8 +1,8 @@
 plugins {
-    id("stash.android.feature")
+    id("luma.android.feature")
 }
 android {
-    namespace = "com.stash.feature.library"
+    namespace = "com.luma.feature.library"
 
     testOptions {
         unitTests {
@@ -31,7 +31,7 @@ dependencies {
     implementation(libs.coil.network.okhttp)
     implementation(libs.activity.compose)
     implementation(libs.datastore.preferences)
-    // MixBuilderViewModel enqueues StashMixRefreshWorker on save.
+    // MixBuilderViewModel enqueues LumaMixRefreshWorker on save.
     implementation(libs.work.runtime.ktx)
 
     testImplementation("junit:junit:4.13.2")

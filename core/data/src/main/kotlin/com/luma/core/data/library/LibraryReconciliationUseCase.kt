@@ -1,0 +1,152 @@
+package com.luma.core.data.library
+
+import com.luma.core.data.db.dao.DownloadQueueDao
+import com.luma.core.data.db.dao.TrackDao
+import com.luma.core.auth.TokenManager
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/** Outcome of a reconciliation pass, for the standalone UI's summary line. */
+data class ReconciliationResult(
+    val orphansSwept: Int,
+    val staleResumed: Int,
+    val filesMissing: Int,
+    val unqueuedRequeued: Int,
+    /** Files found on disk and adopted as already-downloaded (see [LibraryReconciliationUseCase.reconcile]'s `adoptExistingFiles`). */
+    val filesAdopted: Int = 0,
+)
+
+/**
+ * The library-housekeeping pass previously inlined at the top of
+ * [com.luma.core.data.sync.workers.TrackDownloadWorker.doWork]: sweeping
+ * orphaned queue rows and leftover downloads nobody asked for, resetting
+ * exhausted/stale retries, verifying that every "downloaded" track's file still
+ * exists on disk, and, for a sync, re-queuing undownloaded tracks with no active
+ * queue entry.
+ *
+ * Deliberately does NOT touch [com.luma.data.download.files.FileOrganizer]
+ * or [com.luma.data.download.files.LibrarySizeHolder] directly — those
+ * types live in a module that depends on :core:data, so reaching for them
+ * here would invert the module graph. The disk-existence check is passed
+ * in as [checkFileExists] by callers that already have FileOrganizer
+ * (TrackDownloadWorker, LibraryHealthViewModel — both feature/worker-layer).
+ * Callers should also call `librarySizeHolder.refresh()` themselves right
+ * after [reconcile] returns, since a missing-file reset changes storage
+ * totals.
+ *
+ * Extracted so the same pass can run either as the first step of a full
+ * sync (chain mode) or standalone from Library & Storage. Every step but the
+ * requeue is sync-agnostic. The requeue runs only for a sync, whose rows carry
+ * its id and whose download step takes them (#532).
+ *
+ * @param onProgress Invoked after each step with (stepIndex, totalSteps).
+ */
+@Singleton
+class LibraryReconciliationUseCase @Inject constructor(
+    private val downloadQueueDao: DownloadQueueDao,
+    private val trackDao: TrackDao,
+    private val tokenManager: TokenManager,
+) {
+    companion object {
+        const val TOTAL_STEPS = 5
+    }
+
+    /**
+     * @param syncId The sync this pass runs for, or null for Library Health's
+     *   Verify, which then queues nothing (the requeue step is skipped).
+     * @param checkFileExists Returns whether the file at a stored
+     *   `Track.filePath` still exists. Defaults to "always exists" (skips
+     *   the disk check entirely) for callers that don't have file-system
+     *   access — currently none, but keeps the signature safe to call
+     *   without a lambda if a future caller needs that.
+     */
+    /**
+     * @param adoptExistingFiles Marks files already present on disk as downloaded
+     *   (the #413 adoption pass) and returns how many were adopted. Runs BEFORE the
+     *   requeue step so a reinstalled library is recognized instead of queued for a
+     *   full re-download in the same pass (#77/#163: users re-downloaded 8 GB after
+     *   a reinstall because adoption only lived behind the manual Verify button).
+     *   Defaults to a no-op for callers that run adoption themselves
+     *   (LibraryHealthViewModel's Verify reports it as its own step).
+     */
+    suspend fun reconcile(
+        syncId: Long? = null,
+        onProgress: (step: Int, total: Int) -> Unit = { _, _ -> },
+        checkFileExists: suspend (trackId: Long, artist: String, album: String?, title: String, filePath: String) -> com.luma.core.data.library.FileExistenceResult =
+            { _, _, _, _, _ -> com.luma.core.data.library.FileExistenceResult(exists = true) },
+        adoptExistingFiles: suspend () -> Int = { 0 },
+    ): ReconciliationResult {
+        onProgress(0, TOTAL_STEPS)
+
+        val connectedSources = buildList {
+            if (tokenManager.isAuthenticated(com.luma.core.auth.model.AuthService.SPOTIFY)) add("SPOTIFY")
+            if (tokenManager.isAuthenticated(com.luma.core.auth.model.AuthService.YOUTUBE_MUSIC)) add("YOUTUBE")
+            add("BOTH")
+        }
+
+        // Leftovers too (#532): Verify reports them as stale entries cleaned up, and
+        // a sync clears one before its requeue below, so the song it was hiding
+        // gets this sync's row in the same pass.
+        val sweptOrphans = downloadQueueDao.deleteOrphanedQueueEntries() +
+            downloadQueueDao.cancelLeftoverDiscoveryDownloads()
+        onProgress(1, TOTAL_STEPS)
+
+        downloadQueueDao.resetExhaustedRetries()
+        onProgress(2, TOTAL_STEPS)
+
+        // The sync's own leftovers only: a download run outside the sync may be mid-song.
+        val resetInProgress = downloadQueueDao.resetStaleSyncInProgress()
+        onProgress(3, TOTAL_STEPS)
+
+        // Disk-truth check: every track the DB believes is downloaded gets
+        // its file_path verified. A track whose file was deleted outside
+        // the app has its is_downloaded flag reset here so it's visible to
+        // the requeue step immediately below — same pass, not a second run.
+        // A track whose file IS present but under a fresh SAF URI (stale
+        // cached document id post-reinstall) gets its file_path healed in
+        // place instead of being wrongly treated as missing.
+        val downloadedTracks = trackDao.getDownloadedTrackRefs()
+        // Each missing track with the path that was found missing: the reset
+        // skips a row that moved to a new file meanwhile.
+        val missing = LinkedHashMap<Long, String>()
+        for (t in downloadedTracks) {
+            val result = checkFileExists(t.id, t.artist, t.album, t.title, t.filePath)
+            when {
+                !result.exists -> missing[t.id] = t.filePath
+                result.resolvedFilePath != null -> trackDao.healFilePath(t.id, result.resolvedFilePath)
+            }
+        }
+        // What was reset, not what was checked: a track that moved to a new
+        // file between the check and the reset isn't missing.
+        val filesMissing = if (missing.isEmpty()) 0 else trackDao.resetMissingFiles(missing)
+        onProgress(4, TOTAL_STEPS)
+
+        // Adopt files already on disk BEFORE the requeue query below: an adopted
+        // track flips to is_downloaded and is therefore excluded from requeue.
+        // Order is the whole point — reversed, a reinstalled library would be
+        // queued for a full re-download in the same pass that recognizes it.
+        val adopted = adoptExistingFiles()
+
+        // Only a sync requeues: its rows carry its id, and its own download step
+        // takes them. A standalone run (Verify) has no download step. The rows it
+        // used to file had no sync id, so only the background drain took them, and
+        // since #474 it downloaded them unasked at every app start, Stream-only
+        // included (#532). They also hid their songs from the next sync's requeue.
+        val unqueuedTrackIds = if (syncId != null) downloadQueueDao.getUnqueuedTrackIds(connectedSources) else emptyList()
+        if (unqueuedTrackIds.isNotEmpty()) {
+            val newEntries = unqueuedTrackIds.map { trackId ->
+                com.luma.core.data.db.entity.DownloadQueueEntity(trackId = trackId, syncId = syncId)
+            }
+            downloadQueueDao.insertAll(newEntries)
+        }
+        onProgress(5, TOTAL_STEPS)
+
+        return ReconciliationResult(
+            orphansSwept = sweptOrphans,
+            staleResumed = resetInProgress,
+            filesMissing = filesMissing,
+            unqueuedRequeued = unqueuedTrackIds.size,
+            filesAdopted = adopted,
+        )
+    }
+}

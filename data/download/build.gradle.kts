@@ -1,7 +1,7 @@
 import java.util.Properties
 
 plugins {
-    id("stash.android.library")
+    id("luma.android.library")
     alias(libs.plugins.hilt)
     alias(libs.plugins.ksp)
     alias(libs.plugins.kotlin.serialization)
@@ -18,7 +18,7 @@ val qbdlxProps = Properties().apply {
 fun qbdlxProp(key: String, env: String) =
     qbdlxProps.getProperty(key) ?: System.getenv(env).orEmpty()
 
-// ── Stash Lossless Relay runtime config ────────────────────────────────────
+// ── LUMA Lossless Relay runtime config ────────────────────────────────────
 // URL of the ECDSA-signed lossless.json (the app fetches `<url>` and `<url>.sig`)
 // and the base64 X.509 SPKI public key that verifies it. Both empty → the
 // fetcher is disabled and the app has no relay (BYO / custom endpoint only).
@@ -27,7 +27,7 @@ val losslessConfigUrl = qbdlxProp("lossless.configUrl", "LOSSLESS_CONFIG_URL")
 val losslessConfigPubKey = qbdlxProp("lossless.configPubKey", "LOSSLESS_CONFIG_PUBKEY")
 
 android {
-    namespace = "com.stash.data.download"
+    namespace = "com.luma.data.download"
 
     defaultConfig {
         buildConfigField("String", "LOSSLESS_CONFIG_URL", "\"$losslessConfigUrl\"")

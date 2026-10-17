@@ -1,0 +1,366 @@
+package com.luma.core.media.streaming
+
+import android.util.Log
+import com.luma.core.data.db.entity.TrackEntity
+import com.luma.core.data.prefs.StreamingPreference
+import com.luma.core.media.diagnostics.PlaybackDiagnosticsLog
+import com.luma.data.download.lossless.LosslessSourcePreferences
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeout
+import java.util.concurrent.ConcurrentHashMap
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/**
+ * Walks LUMA's streaming-source roster in priority order and returns
+ * the first match. Each resolver internally handles its own enablement
+ * (captcha cookies, circuit-breaker state for non-streaming paths, etc.)
+ * — null from one resolver just means "try the next one".
+ *
+ * Current order:
+ *   1. [QbdlxStreamResolver]   — `qbdlx`, the DIRECT Qobuz API (signed
+ *      requests against the user's own connected account, or a relay standing
+ *      in for one). Primary lossless source: plain Range-seekable FLAC, no proxy
+ *      operator and no client-side decrypt, so it's the fastest path.
+ *      Foreground-only (allowYtDlp) since it spends that account's quota.
+ *   PARKED (2026-07-01, hosts down for us — commented out of the chain in
+ *   [resolve], kept for re-enablement): [KennyyStreamResolver] (`kennyy.com.br`),
+ *   [QobuzStreamResolver] (`qobuz.squid.wtf`).
+ *   2. [YouTubeStreamResolver] — yt-dlp / InnerTube extraction. Last
+ *      resort, reached only when the track genuinely isn't in the Qobuz
+ *      catalog (Bandcamp re-uploads, region-exclusive, underground
+ *      releases). Lossy quality (AAC/Opus ~128-160 kbps), surfaced as a
+ *      "via YT" badge in Now Playing so the user knows.
+ *
+ * Exposes the same `resolve(track) -> StreamUrl?` shape as the individual
+ * resolvers so callers ([PlayerRepositoryImpl], [StreamingMediaSourceFactory],
+ * [RefreshingDataSourceFactory], [PrefetchOrchestrator]) can swap in by
+ * type without changing call-site logic.
+ *
+ * Result caching is the caller's responsibility — [StreamUrlCache] sits
+ * on the player side and stores the first source's success keyed by track
+ * id. Subsequent plays of the same track hit the cache and bypass the
+ * registry entirely until the URL's `etsp` expires.
+ *
+ * Test toggles (off for normal use):
+ *  - [StreamingPreference.isForceYouTubeFallback]: [resolve] skips Kennyy
+ *    and Squid entirely and routes every track through the YouTube resolver
+ *    only — reproduces the lossless-down fallback path on demand.
+ */
+@Singleton
+class StreamSourceRegistry internal constructor(
+    private val kennyy: KennyyStreamResolver,
+    private val qobuz: QobuzStreamResolver,
+    private val qbdlx: QbdlxStreamResolver,
+    private val jiosaavn: JioSaavnStreamResolver,
+    private val youtube: YouTubeStreamResolver,
+    private val streamingPreference: StreamingPreference,
+    private val losslessSourceHealth: LosslessSourceHealth,
+    private val losslessPrefs: LosslessSourcePreferences,
+    /** Where resolves run; tests pass a test dispatcher so the hedge is measured in virtual time. */
+    resolveDispatcher: CoroutineDispatcher,
+    /** The diagnostics bundle's "Recent resolves". A fresh, unshared one in hand-built tests. */
+    private val diagnosticsLog: PlaybackDiagnosticsLog = PlaybackDiagnosticsLog(),
+) {
+    @Inject
+    constructor(
+        kennyy: KennyyStreamResolver,
+        qobuz: QobuzStreamResolver,
+        qbdlx: QbdlxStreamResolver,
+        jiosaavn: JioSaavnStreamResolver,
+        youtube: YouTubeStreamResolver,
+        streamingPreference: StreamingPreference,
+        losslessSourceHealth: LosslessSourceHealth,
+        losslessPrefs: LosslessSourcePreferences,
+        diagnosticsLog: PlaybackDiagnosticsLog,
+    ) : this(
+        kennyy, qobuz, qbdlx, jiosaavn, youtube, streamingPreference,
+        losslessSourceHealth, losslessPrefs, Dispatchers.IO, diagnosticsLog,
+    )
+    /**
+     * Try each resolver in priority order; return the first non-null
+     * [StreamUrl]. Returns null when no source produced a match — caller
+     * should surface this as [StreamRoutingResult.NotAvailable].
+     *
+     * @param allowYouTube pass `false` to skip lossy fallbacks (JioSaavn
+     *   and YouTube), leaving only configured lossless sources. Used by
+     *   [PlayerRepositoryImpl.setQueue]'s background-fill path so
+     *   yt-dlp's limited 2-slot extraction semaphore stays available
+     *   for the foreground user-tap critical path. Foreground (tapped
+     *   track) calls leave this true.
+     * @param allowYtDlp pass `false` to make the YouTube fallback resolve
+     *   via the fast InnerTube engine only (no slow yt-dlp). Used by the
+     *   background-fill path so a 15-35s yt-dlp invocation never sits on
+     *   the queue's critical path. Foreground calls leave this true.
+     */
+    suspend fun resolve(
+        track: TrackEntity,
+        allowYouTube: Boolean = true,
+        allowYtDlp: Boolean = true,
+    ): StreamUrl? {
+        // Single-flight. A foreground tap and the next-up prefetch landing on the
+        // same track within a few hundred ms each ran their OWN full resolver
+        // chain: doubled calls to every source (including rate-limited search
+        // APIs and the qbdlx account's quota), and because each drove the YouTube
+        // resolver's own per-videoId coalescing to start and tear down before
+        // the other began, one ~13 s yt-dlp extraction became two sequential
+        // ones. Device-observed 2026-08-22: a track resolved via yt-dlp, then a
+        // second full chain started 325 ms later for the identical track.
+        //
+        // Keyed on the FLAGS as well as the id: background fill calls with
+        // allowYouTube/allowYtDlp = false deliberately accept a narrower source
+        // set, and must never be handed a foreground result (or vice versa).
+        val key = resolveKey(track.id, allowYouTube, allowYtDlp)
+        inFlightResolves[key]?.let { return it.await() }
+
+        val fresh = resolveScope.async(start = CoroutineStart.LAZY) {
+            // The timeout MUST live INSIDE the shared coroutine, not at the
+            // caller. LazyResolvingDataSource wraps its call in
+            // withTimeout(RESOLVE_DEADLINE_MS) as the documented guarantee that
+            // "a hung resolver can NEVER wedge playback" — but that bounds the
+            // caller's await(), not this detached job. Without the timeout here
+            // a wedged chain would run forever, invokeOnCompletion would never
+            // fire, the map entry would never clear, and EVERY later attempt at
+            // that track would coalesce onto the same dead Deferred and time
+            // out — turning a transient hang into a permanently unplayable
+            // track, which is worse than the duplicate resolve this fixes.
+            withTimeout(LazyResolvingDataSource.RESOLVE_DEADLINE_MS) {
+                doResolve(track, allowYouTube, allowYtDlp)
+            }
+        }
+        val existing = inFlightResolves.putIfAbsent(key, fresh)
+        val deferred = if (existing != null) {
+            // Lost the race. `async` attaches the child to resolveScope's job at
+            // CONSTRUCTION even with CoroutineStart.LAZY, so an unstarted,
+            // uncancelled loser stays in the parent's child list — with its
+            // captured TrackEntity — for the process lifetime.
+            fresh.cancel()
+            existing
+        } else {
+            fresh.also { d ->
+                d.invokeOnCompletion { inFlightResolves.remove(key, d) }
+                d.start()
+            }
+        }
+        // Caller cancellation still propagates out of await(), so tap-preemption
+        // keeps surfacing as a CancellationException rather than a bogus
+        // "Couldn't find this track" — see the chain loop below.
+        return deferred.await()
+    }
+
+    /**
+     * Shared scope for in-flight resolves. Mirrors
+     * [com.luma.data.download.preview.PreviewUrlExtractor]'s `extractorScope`
+     * deliberately: a resolve has to outlive any ONE caller's cancellation, or
+     * coalescing would be pointless — the whole value is that a second waiter on
+     * the same track gets the in-flight result instead of restarting the chain.
+     */
+    private val resolveScope = CoroutineScope(SupervisorJob() + resolveDispatcher)
+
+    /** In-flight resolves, keyed by [resolveKey]; entries self-remove on completion. */
+    private val inFlightResolves = ConcurrentHashMap<String, Deferred<StreamUrl?>>()
+
+    private fun resolveKey(trackId: Long, allowYouTube: Boolean, allowYtDlp: Boolean) =
+        "$trackId:$allowYouTube:$allowYtDlp"
+
+    /** The resolver-chain walk itself; reached only via [resolve]'s single-flight. */
+    private suspend fun doResolve(
+        track: TrackEntity,
+        allowYouTube: Boolean,
+        allowYtDlp: Boolean,
+    ): StreamUrl? {
+        val startedNs = System.nanoTime()
+        // The Lossless switch (Settings › Audio & Quality) governs streaming as well as
+        // downloads (2026-09-05): off means no FLAC anywhere, so the lossless sources
+        // leave the chain and the track streams from the lossy rungs. It outranks the
+        // force-source test toggles: a stale force pref must not override a user choice.
+        val lossless = losslessPrefs.enabledNow()
+        val resolvers = buildList<Pair<String, suspend (TrackEntity) -> StreamUrl?>> {
+            if (streamingPreference.isForceQbdlxOnly()) {
+                // Test toggle: qbdlx (direct-Qobuz) ONLY — skip every other source
+                // so qbdlx can be exercised even when the proxies are healthy.
+                // Takes precedence over the other force toggles. Gated by
+                // allowYtDlp so speculative background fill spends none of that
+                // account's quota (only foreground/next-up resolves hit it).
+                if (allowYtDlp && lossless) add("qbdlx" to qbdlx::resolve)
+                // A force toggle is a TEST instrument, but the pref outlives the
+                // build — and qbdlx can die under it (it did; #429's reporter had
+                // this toggle on and got an infinite spinner on every track). Keep
+                // the lossy safety net so no stale preference means silence.
+                // Retiring a source has to mean retiring its force branch in the
+                // same change, or a stale pref with no UI left to clear it routes
+                // every track through a dead source.
+                if (allowYouTube && allowYtDlp) add("jiosaavn" to jiosaavn::resolve)
+                if (allowYouTube) add("youtube" to { t: TrackEntity -> youtube.resolve(t, allowYtDlp) })
+            } else if (streamingPreference.isForceYouTubeFallback()) {
+                // Test toggle: skip the lossless sources, forcing the
+                // YouTube fallback path. Still gated by allowYouTube so the
+                // background-fill keeps resolving nothing (matching a genuine
+                // both-sources-down outage).
+                if (allowYouTube) add("youtube" to { t: TrackEntity -> youtube.resolve(t, allowYtDlp) })
+            } else {
+                // PARKED 2026-07-01: kennyy/squid hosts are down for us. Kept in
+                // sync with LosslessSourceRegistry.PARKED_SOURCE_IDS (download
+                // side) — re-enabling is uncommenting these two lines.
+                // add("kennyy" to kennyy::resolve)
+                // add("squid" to qobuz::resolve)
+
+                // qbdlx (direct Qobuz API) is the primary lossless source:
+                // plain Range-seekable FLAC, no proxy, no client-side decrypt —
+                // the fastest path. Foreground/next-up only (allowYtDlp = true),
+                // never the speculative background fill.
+                // qbdlx self-gates on LosslessAvailability (BYO / custom endpoint
+                // / relay); no build gate.
+                if (allowYtDlp && lossless) {
+                    add("qbdlx" to qbdlx::resolve)
+                }
+                // AAC 320 fallback (96 under Save Data). Foreground/next-up only: a
+                // speculative full-queue fill must not turn into one metadata
+                // search + media probe per track. Any miss/outage continues to
+                // the existing YouTube fallback below.
+                if (allowYouTube && allowYtDlp) {
+                    add("jiosaavn" to jiosaavn::resolve)
+                }
+                if (allowYouTube) add("youtube" to { t: TrackEntity -> youtube.resolve(t, allowYtDlp) })
+            }
+        }
+        // Which sources are actually IN PLAY for this resolve, and why.
+        //
+        // Added after a "works in debug, dead in release" hunt where qbdlx never
+        // appeared in the logs at all and there was no way to tell whether it had
+        // been tried and failed, or silently excluded before it ever ran. The two
+        // gates that can drop a source here are invisible from the outside:
+        // `allowYtDlp` (false for speculative background fill) and the Lossless
+        // switch. Info level so a release build says so.
+        Log.i(
+            TAG,
+            "chain for ${track.id}: [${resolvers.joinToString(",") { it.first }}] " +
+                "allowYouTube=$allowYouTube allowYtDlp=$allowYtDlp lossless=$lossless",
+        )
+
+        // P3 (2026-09-06): the YouTube fast lane (one InnerTube round trip and a
+        // probe, never yt-dlp) and the JioSaavn search start NOW, alongside the
+        // rungs ahead of them, instead of after those rungs miss. Measured before
+        // this: a relay miss of 2.0 s plus a JioSaavn miss of 1.3 s before the
+        // YouTube resolve even started. A lossless hit cancels both lanes; a miss
+        // consults JioSaavn first (its rank is unchanged), then the fast lane, and
+        // only then the yt-dlp-capable rung. Foreground resolves only: the
+        // speculative background fill keeps its cheap sequential chain.
+        val hedged = allowYouTube && allowYtDlp && resolvers.size > 1 && resolvers.last().first == "youtube"
+
+        // For the diagnostics bundle's "Recent resolves": the rung that served, set at each
+        // exit below. Still null when the walk ends means every rung missed.
+        var servedBy: String? = null
+        return try {
+            coroutineScope {
+                val jioLane = if (hedged && resolvers.any { it.first == "jiosaavn" }) {
+                    async { quietly("jiosaavn", track) { jiosaavn.resolve(track) } }
+                } else {
+                    null
+                }
+                val fastLane = if (hedged) {
+                    async { quietly("youtube-fast", track) { youtube.resolve(track, allowYtDlp = false) } }
+                } else {
+                    null
+                }
+
+                for ((name, fn) in resolvers) {
+                    if (hedged && (name == "jiosaavn" || name == "youtube")) continue // consulted below
+                    val result = quietly(name, track) { fn(track) }
+                    // Feed the Home lossless-offline banner signal: a qbdlx null here
+                    // is a miss (dead credential OR catalog gap; the streak threshold
+                    // tells them apart), a non-null is a serve that resets the streak.
+                    if (name == "qbdlx") {
+                        if (result != null) losslessSourceHealth.recordQbdlxServed() else losslessSourceHealth.recordQbdlxMiss()
+                    }
+                    if (result != null) {
+                        // Diagnostic: which source actually served the stream. Helps
+                        // explain "this track played but at lower quality" reports.
+                        Log.i(TAG, "$name served ${track.id} '${track.title}'")
+                        servedBy = name
+                        jioLane?.cancel()
+                        fastLane?.cancel()
+                        return@coroutineScope result
+                    }
+                }
+                // LUMA: a ready YouTube stream no longer waits out the whole JioSaavn
+                // search (measured: ~0.3 s on Wi-Fi, more on mobile data, on every
+                // tap). JioSaavn still wins when it answers first or within
+                // JIO_GRACE_MS of the fast lane; a fast-lane miss still waits for it.
+                val jioResult = jioLane?.let { jio ->
+                    val fast = fastLane
+                    if (fast == null) return@let jio.await()
+                    kotlinx.coroutines.selects.select<Unit> {
+                        jio.onAwait {}
+                        fast.onAwait {}
+                    }
+                    when {
+                        jio.isCompleted -> jio.await()
+                        fast.await() == null -> jio.await()
+                        else -> kotlinx.coroutines.withTimeoutOrNull(JIO_GRACE_MS) { jio.await() }
+                            .also { if (!jio.isCompleted) jio.cancel() }
+                    }
+                }
+                jioResult?.let {
+                    Log.i(TAG, "jiosaavn served ${track.id} '${track.title}' (hedged)")
+                    servedBy = "jiosaavn"
+                    fastLane?.cancel()
+                    return@coroutineScope it
+                }
+                fastLane?.await()?.let {
+                    Log.i(TAG, "youtube served ${track.id} '${track.title}' (fast lane, hedged)")
+                    servedBy = "youtube (fast lane)"
+                    return@coroutineScope it
+                }
+                if (hedged) {
+                    quietly("youtube", track) { youtube.resolve(track, allowYtDlp = true) }?.also {
+                        Log.i(TAG, "youtube served ${track.id} '${track.title}'")
+                        servedBy = "youtube"
+                    }
+                } else {
+                    null
+                }
+            }.also {
+                diagnosticsLog.recordResolve(track.id, servedBy ?: "none (all missed)", msSince(startedNs), lossless)
+            }
+        } catch (e: TimeoutCancellationException) {
+            // resolve()'s deadline fired mid-walk. A hang is an outcome, and the player only sees
+            // it as a generic IO error, so it gets its own line. Any other cancellation is not an
+            // outcome (see quietly) and is never recorded.
+            diagnosticsLog.recordResolve(track.id, "none (timed out)", msSince(startedNs), lossless)
+            throw e
+        }
+    }
+
+    private fun msSince(startedNs: Long): Long = (System.nanoTime() - startedNs) / 1_000_000
+
+    /**
+     * Runs one rung. Preemption (the user tapped another track) cancels this job
+     * and the CancellationException MUST propagate, or resolve() would return
+     * null and the caller fire a bogus "Couldn't find this track". Any other
+     * throw is a resolver bug: logged, and read as a miss so the chain goes on.
+     */
+    private suspend fun quietly(name: String, track: TrackEntity, block: suspend () -> StreamUrl?): StreamUrl? =
+        try {
+            block()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "$name threw on resolve for ${track.id} '${track.title}'", e)
+            null
+        }
+
+    private companion object {
+        private const val TAG = "StreamSourceRegistry"
+        /** How long a ready YouTube stream waits for a still-searching JioSaavn. */
+        private const val JIO_GRACE_MS = 250L
+    }
+}

@@ -1,8 +1,8 @@
 plugins {
-    id("stash.android.feature")
+    id("luma.android.feature")
 }
 android {
-    namespace = "com.stash.feature.community"
+    namespace = "com.luma.feature.community"
 
     testOptions {
         unitTests {

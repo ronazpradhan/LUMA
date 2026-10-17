@@ -1,0 +1,2470 @@
+package com.luma.core.media.service
+
+import android.content.Intent
+import androidx.annotation.OptIn
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.common.Timeline
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.CommandButton
+import androidx.media3.session.LibraryResult
+import androidx.media3.session.MediaLibraryService
+import androidx.media3.session.MediaSession
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionError
+import androidx.media3.session.SessionResult
+import androidx.media3.common.MediaMetadata
+import com.google.common.collect.ImmutableList
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
+import com.luma.core.data.db.dao.PlaylistDao
+import com.luma.core.data.db.dao.TrackDao
+import com.luma.core.data.prefs.CrossfadePreference
+import com.luma.core.data.social.LikeCoordinator
+import com.luma.core.media.R
+import com.luma.core.media.equalizer.EqController
+import com.luma.core.media.toPlayerRepeatMode
+import com.luma.core.media.mediaToWallMs
+import com.luma.core.media.wallToMediaMs
+import com.luma.core.media.equalizer.LoudnessController
+import com.luma.core.media.equalizer.LumaRenderersFactory
+import com.luma.core.media.equalizer.computeGain
+import com.luma.core.media.equalizer.watchDspActivation
+import com.luma.core.media.PlaybackResumer
+import com.luma.core.media.ResumePlayGate
+import com.luma.core.media.ResumeStreamResolver
+import com.luma.core.media.SleepTimerController
+import com.luma.core.media.streaming.PrefetchOrchestrator
+import com.luma.core.media.streaming.LumaMediaSourceFactory
+import com.luma.core.media.streaming.StreamingMediaSourceFactory
+import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.guava.future
+import javax.inject.Inject
+import androidx.core.app.ServiceCompat
+import androidx.core.net.toUri
+import com.luma.core.data.db.entity.TrackEntity
+import com.luma.core.common.extensions.pluralize
+
+/**
+ * Background playback service that hosts an [ExoPlayer] and exposes a [MediaSession]
+ * for media-controller clients (e.g. system notification, Bluetooth, Android Auto).
+ *
+ * Custom session commands:
+ * - [COMMAND_TOGGLE_SHUFFLE] -- toggles shuffle mode on/off
+ * - [COMMAND_CYCLE_REPEAT]   -- cycles repeat mode: OFF -> ALL -> ONE -> OFF
+ * - [COMMAND_TOGGLE_LIKE]    -- toggles LUMA Liked Songs membership for the
+ *   currently playing track. Surfaced as a heart icon in the system
+ *   notification (expanded view) so the user can like/unlike from the
+ *   lockscreen without opening Now Playing.
+ */
+@AndroidEntryPoint
+class LumaPlaybackService : MediaLibraryService() {
+
+    @Inject lateinit var eqController: EqController
+    @Inject lateinit var loudnessController: LoudnessController
+    @Inject lateinit var trackDao: TrackDao
+    @Inject lateinit var playlistDao: PlaylistDao
+    @Inject lateinit var likeCoordinator: LikeCoordinator
+    @Inject lateinit var prefetchOrchestrator: PrefetchOrchestrator
+    @Inject lateinit var sleepTimerController: SleepTimerController
+    @Inject lateinit var streamingMediaSourceFactory: StreamingMediaSourceFactory
+    @Inject lateinit var playbackResumer: PlaybackResumer
+    @Inject lateinit var resumeStreamResolver: ResumeStreamResolver
+    @Inject lateinit var crossfadePreference: CrossfadePreference
+    @Inject lateinit var playbackSessionBus: com.luma.core.media.PlaybackSessionBus
+
+    /** Deps for the full-timeline lazy-resolve chain (LazyResolvingDataSource). */
+    @Inject lateinit var streamResolver: com.luma.core.media.streaming.StreamSourceRegistry
+    @Inject lateinit var streamUrlCache: com.luma.core.media.streaming.StreamUrlCache
+
+
+    /**
+     * Shared OkHttp client. Used by [LumaMediaSourceFactory] to stream
+     * JioSaavn-origin items through an
+     * [androidx.media3.datasource.okhttp.OkHttpDataSource].
+     */
+    @Inject lateinit var okHttpClient: okhttp3.OkHttpClient
+    @Inject lateinit var discordRpcCoordinator: com.luma.core.data.discord.DiscordRpcCoordinator
+
+    // Listen Together (spec 2026-09-24 §5): the session engine lives here and drives the master player.
+    @Inject lateinit var listenTogetherController: com.luma.core.media.listen.ListenTogetherController
+    @Inject lateinit var listenTogetherCatalog: com.luma.core.media.listen.DefaultSessionCatalog
+    @Inject lateinit var roomApiClient: com.luma.core.data.listen.RoomApiClient
+    @Inject lateinit var roomConnector: com.luma.core.data.listen.OkHttpRoomConnector
+    @Inject lateinit var autoplayRadioPreference: com.luma.core.data.prefs.AutoplayRadioPreference
+    @Inject lateinit var sharePreference: com.luma.core.data.share.SharePreference
+    @Inject lateinit var playbackStateStore: com.luma.core.media.PlaybackStateStore
+
+    /** Google Cast (spec 2026-10-06). */
+    @Inject lateinit var castDevices: com.luma.core.media.cast.CastDevices
+    @Inject lateinit var playbackDiagnosticsLog: com.luma.core.media.diagnostics.PlaybackDiagnosticsLog
+
+    companion object {
+        /** Custom command action for toggling shuffle mode. */
+        const val COMMAND_TOGGLE_SHUFFLE = "com.luma.TOGGLE_SHUFFLE"
+
+        /** Custom command action for cycling repeat mode. */
+        const val COMMAND_CYCLE_REPEAT = "com.luma.CYCLE_REPEAT"
+
+        /** Custom command action for toggling LUMA Liked on the current track. */
+        const val COMMAND_TOGGLE_LIKE = "com.luma.TOGGLE_LIKE"
+
+        /** Custom command action for cancelling an armed sleep timer. */
+        const val COMMAND_STOP_SLEEP_TIMER = "com.luma.STOP_SLEEP_TIMER"
+
+        /** Custom command action for leaving a Listen Together session from the notification. */
+        const val COMMAND_LEAVE_SESSION = "com.luma.LEAVE_SESSION"
+
+        /** Extra key for the track ID in MediaMetadata extras. */
+        const val EXTRA_TRACK_ID = "stash_track_id"
+
+        /**
+         * Extra key for the track's YouTube video id. Carried alongside
+         * [EXTRA_TRACK_ID] so the notification heart can resolve a
+         * v0.9.30 streaming-engine synthetic id to a real DB row via
+         * `TrackDao.findByYoutubeId` (issue #105 fix).
+         */
+        const val EXTRA_TRACK_YOUTUBE_ID = "stash_track_youtube_id"
+
+        /**
+         * Extra key for the track's duration in milliseconds. Without
+         * this, `MediaItem.toTrack` rehydrates streaming tracks with
+         * `durationMs = 0` (the domain default), and `ensureTrackPersisted`
+         * then inserts a Liked-Songs row with duration 0:00 (issue #105
+         * follow-up: Liked Songs detail showed 0:00 for stream-only tracks).
+         */
+        const val EXTRA_TRACK_DURATION_MS = "stash_track_duration_ms"
+
+        /**
+         * Extra key for the track's `isStreamable` flag. Carried alongside
+         * [EXTRA_TRACK_ID] so the auto-advance listener can decide whether
+         * to silent-skip a track that the queue would play but the user
+         * can't reach (stream-only + offline). v0.9.37.
+         */
+        const val EXTRA_TRACK_IS_STREAMABLE = "stash_track_is_streamable"
+
+        // ── Streaming-format extras ───────────────────────────────────
+        // Written into MediaMetadata.extras when a streaming-only track
+        // gets its URL resolved (PlayerRepositoryImpl.buildMediaItemForTrack).
+        // Read back by MediaItem.toTrack so the Now Playing screen can
+        // show the actual codec/bit-depth/sample-rate Qobuz is serving
+        // instead of the stale Room defaults (`fileFormat = "opus"`).
+        /** Lowercase codec tag from Qobuz, e.g. `"flac"`, `"mp3"`. */
+        const val EXTRA_STREAM_CODEC = "stash_stream_codec"
+        /** Bits per sample (16, 24); absent for lossy. */
+        const val EXTRA_STREAM_BIT_DEPTH = "stash_stream_bit_depth"
+        /** Sample rate in Hz (44100, 96000…). */
+        const val EXTRA_STREAM_SAMPLE_RATE = "stash_stream_sample_rate"
+        /** Stated bitrate in kbps. */
+        const val EXTRA_STREAM_BITRATE = "stash_stream_bitrate"
+        /**
+         * Resolver origin that produced this stream's URL —
+         * `"kennyy"` / `"squid"` (Qobuz lossless) or `"youtube"`
+         * (yt-dlp / InnerTube extraction, lossy). Read by Now Playing
+         * to surface a "via YT" badge so the user knows when playback
+         * has dropped from FLAC to YouTube-extracted audio.
+         */
+        const val EXTRA_STREAM_ORIGIN = "stash_stream_origin"
+
+        private const val ROOT_ID = "ROOT"
+        private const val PLAYLISTS_ID = "PLAYLISTS"
+        private const val RECENTLY_ADDED_ID = "RECENTLY_ADDED"
+        private const val PLAYLIST_PREFIX = "PLAYLIST_"
+        private const val SHUFFLE_PLAY_PREFIX = "SHUFFLE_PLAY_"
+        /** The car's ONE merged likes entry; its shuffle id is SHUFFLE_PLAY_PREFIX + LIKED_ID. */
+        private const val LIKED_ID = "LIKED"
+
+        /**
+         * How often the prefetch poll checks playback position against
+         * the 60 %-played threshold. 5 s keeps the worst-case prefetch
+         * latency below half a poll-interval after crossing the
+         * threshold without burning unnecessary CPU on a wakelock-held
+         * service. Pulling this lower wastes battery; higher than ~10 s
+         * risks crossing the threshold too late on short (<60 s) tracks.
+         */
+        private const val PREFETCH_POLL_INTERVAL_MS = 5_000L
+
+        /**
+         * Crossfade arm-poll cadence. Finer than the prefetch poll so the fade
+         * fires within the chosen 1–12 s window before track end; 250 ms keeps
+         * worst-case arm jitter to a quarter-second.
+         */
+        private const val CROSSFADE_POLL_INTERVAL_MS = 250L
+
+        /**
+         * Remaining-time threshold at which the spare is primed (once the next
+         * track's URL is resolved). Large so cold streams get tens of seconds to
+         * buffer before the seam.
+         */
+        private const val PREPARE_AT_MS = 90_000L
+
+        /** Slack left on the outgoing when the fade ends, so it doesn't hit its natural end. */
+        private const val HANDOFF_MARGIN_MS = 500L
+
+        /** Below this much usable fade, skip the crossfade (hard cut). */
+        private const val MIN_FADE_MS = 800L
+
+        /** Separate, low-priority channel for the sleep-timer status notification. */
+        private const val SLEEP_TIMER_CHANNEL_ID = "stash_sleep_timer"
+
+        /**
+         * Notification id for the sleep-timer status notification. Distinct from Media3's
+         * media notification and from the sync's progress notification (9001): sharing 9001
+         * let each replace the other, and a finished sync cleared a running timer's notice.
+         */
+        private const val SLEEP_TIMER_NOTIFICATION_ID = 9101
+
+        /** How often the sleep-timer notification's remaining-time text refreshes. */
+        private const val SLEEP_TIMER_TICK_MS = 60_000L
+
+        /**
+         * How long the player must sit idle (paused / queue ended / errored
+         * out) before the service stops itself. Long enough that a podcast
+         * pause or a phone call never loses the session; short enough that a
+         * forgotten pause doesn't keep the process undying all day — the
+         * measured cost of that was ~10 mA around the clock.
+         */
+        internal const val IDLE_STOP_TIMEOUT_MS = 5 * 60_000L
+
+        /**
+         * Idle stop while casting. Stopping the service ends the cast session
+         * (the speaker drops back to its idle screen and has to be picked
+         * again), so a paused speaker gets longer than the phone does: long
+         * enough for a phone call or dinner, not forever. The cost of waiting
+         * is the foreground service and the speaker connection; the wake and
+         * Wi-Fi locks are already let go while the speaker is paused.
+         */
+        internal const val CAST_IDLE_STOP_TIMEOUT_MS = 30 * 60_000L
+    }
+
+    private var mediaSession: MediaLibrarySession? = null
+
+    // Service-scoped CoroutineScope for the like-state observer + toggle
+    // suspending calls. Cancelled in onDestroy so the observer doesn't leak
+    // when the service stops.
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var likeObserverJob: Job? = null
+
+    /**
+     * Periodic position-poll that drives [PrefetchOrchestrator]. Started
+     * when playback becomes active, cancelled when it stops or when a
+     * track transition occurs (a new poll is started for the next track).
+     * Runs on the service's main scope so player reads stay on the
+     * required thread.
+     */
+    private var prefetchPollJob: Job? = null
+
+    /** Ticks the sleep-timer status notification while a countdown is armed. */
+    private var sleepTimerNotificationJob: Job? = null
+
+    /**
+     * Two-player crossfade engine (role-swap). Owns players A and B; whichever
+     * is master is wired to [mediaSession]. Built in [onCreate].
+     */
+    private var crossfadeEngine: CrossfadeEngine? = null
+
+    /**
+     * Dedicated ~250 ms poll driving crossfade prepare + fire decisions.
+     * Separate from [prefetchPollJob] (5 s — too coarse for a 1–12 s seam).
+     */
+    private var crossfadePollJob: Job? = null
+
+    /** Cached crossfade prefs (off by default); collected in [onCreate]. */
+    @Volatile private var crossfadeEnabled = false
+    @Volatile private var crossfadeDurationMs = 6000L
+
+    /** mediaId the spare is currently primed for, so we don't re-prepare it. */
+    @Volatile private var crossfadePreparedId: String? = null
+
+    /** The crossfade preference as last read; [crossfadeEnabled] is this AND not suspended. */
+    @Volatile private var crossfadePrefEnabled = false
+
+    /** Listen Together's session-scoped crossfade override. In memory only, so a crash can't leave crossfade off (spec §4). */
+    private var crossfadeSuspended = false
+
+    private var listenTogetherSession: com.luma.core.media.listen.ListenTogetherSession? = null
+    private var togetherPlayer: com.luma.core.media.listen.ListenTogetherPlayer? = null
+    private var togetherListener: Player.Listener? = null
+
+    /** The player [playerListener] is currently attached to (moves on swap). */
+    private var listenedPlayer: Player? = null
+
+    /** Built in [onCreate]; kept so the cast media server reads songs through the same routing. */
+    private var mediaSourceFactory: LumaMediaSourceFactory? = null
+
+    /**
+     * Casting (spec 2026-10-06 §3). [castPlayer] is the session's player while
+     * [isCasting]; the master sits stopped underneath it. One instance per
+     * service, like [togetherPlayer].
+     */
+    private var castPlayer: com.luma.core.media.cast.CastSessionPlayer? = null
+    private var castServer: com.luma.core.media.cast.CastMediaServer? = null
+    private var castWakeLock: android.os.PowerManager.WakeLock? = null
+    private var castWifiLock: android.net.wifi.WifiManager.WifiLock? = null
+    private val isCasting: Boolean get() = castPlayer?.isAttached == true
+
+    /** When the cast player last became idle (elapsedRealtime), or null while it plays. */
+    private var castIdleSinceMs: Long? = null
+
+    /** The player that is actually making sound: the speaker's while casting, else the master. */
+    private val activePlayer: Player? get() = castPlayer?.takeIf { it.isAttached } ?: crossfadeEngine?.masterPlayer
+
+    /**
+     * Feed for [idleStopTicker]: true while the master player is idle (see
+     * [isPlayerIdle]). Starts true — a service created without playback
+     * (boot-time notification population, a connect that never plays) must
+     * count down from creation, that lingering record was half the measured
+     * idle drain. Updated from [playerListener] and re-read from the new
+     * master after a crossfade swap.
+     */
+    private val playerIdle = MutableStateFlow(true)
+
+    /**
+     * Forces playback to start when a real *play* request restores a queue
+     * onto the empty player. Media3 is supposed to auto-play after
+     * resumption on a play request, but from a warm process that auto-play
+     * sometimes doesn't take and the queue loads paused. Armed in
+     * [onPlaybackResumption] and consumed in [onTimelineChanged] once the
+     * restored timeline lands. Stays closed for boot-time notification
+     * population so the device never starts playing on its own after a
+     * reboot. See [ResumePlayGate].
+     */
+    private val resumePlayGate = ResumePlayGate()
+
+    /**
+     * The per-track / transport listener. Extracted to a field (not inline) so
+     * it can be moved from the old master to the new one when the crossfade
+     * engine swaps players. Always references the CURRENT master via
+     * [crossfadeEngine].masterPlayer rather than a captured instance.
+     */
+    @OptIn(UnstableApi::class)
+    private val playerListener = object : Player.Listener {
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            // A user skip (SEEK) or queue change (PLAYLIST_CHANGED) aborts a
+            // pending/in-flight crossfade and hard-cuts. The engine's own
+            // role-swap does NOT surface here — we move this listener to the new
+            // master instead of advancing the old one.
+            when (reason) {
+                Player.MEDIA_ITEM_TRANSITION_REASON_SEEK,
+                Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED -> {
+                    crossfadeEngine?.cancelTransition()
+                    crossfadePreparedId = null
+                }
+            }
+            updateCustomLayout()
+            onTrackTransitionForLoudness(mediaItem)
+            prefetchOrchestrator.resetSession()
+            // While casting the master is stopped; castListener drives presence and the poll.
+            if (isCasting) return
+            val master = crossfadeEngine?.masterPlayer
+            updateDiscordPresence(mediaItem, master?.isPlaying == true)
+            if (master?.isPlaying == true) {
+                startPrefetchPoll(master)
+                startCrossfadePoll(master)
+            }
+        }
+
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            // During a transition the engine owns both players' play/pause state
+            // (pauseAtEndOfMediaItems, the spare) — ignore the churn it makes.
+            if (crossfadeEngine?.isTransitioning() == true) return
+            if (isCasting) return // the master was stopped for the cast; castListener has this
+            val master = crossfadeEngine?.masterPlayer
+            updateDiscordPresence(master?.currentMediaItem, isPlaying)
+            if (isPlaying && master != null) {
+                startPrefetchPoll(master)
+                startCrossfadePoll(master)
+            } else {
+                prefetchPollJob?.cancel(); prefetchPollJob = null
+                crossfadePollJob?.cancel(); crossfadePollJob = null
+            }
+        }
+
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            refreshPlayerIdle()
+        }
+
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            refreshPlayerIdle()
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            crossfadeEngine?.cancelTransition()
+            crossfadePreparedId = null
+        }
+
+        override fun onPositionDiscontinuity(
+            oldPosition: Player.PositionInfo,
+            newPosition: Player.PositionInfo,
+            reason: Int,
+        ) {
+            if (reason == Player.DISCONTINUITY_REASON_SEEK) {
+                val master = crossfadeEngine?.masterPlayer
+                updateDiscordPresence(master?.currentMediaItem, master?.isPlaying == true)
+            }
+        }
+
+        override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+            // While casting, "play" means the speaker: never start the stopped master.
+            val master = activePlayer ?: return
+            when (resumePlayGate.onTimelineChanged(
+                timeline.windowCount,
+                master.playbackState == Player.STATE_IDLE,
+            )) {
+                ResumePlayGate.Action.PREPARE_THEN_PLAY -> { master.prepare(); master.play() }
+                ResumePlayGate.Action.PLAY -> master.play()
+                ResumePlayGate.Action.NONE -> Unit
+            }
+        }
+
+        override fun onRepeatModeChanged(repeatMode: Int) = updateCustomLayout()
+        override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) = updateCustomLayout()
+    }
+
+    @OptIn(UnstableApi::class)
+    override fun onCreate() {
+        super.onCreate()
+
+        // Listen Together: "With Maya +2 · <artist>" while a session runs. Otherwise the stock provider.
+        val baseProvider = object : androidx.media3.session.DefaultMediaNotificationProvider(this) {
+            override fun getNotificationContentText(metadata: MediaMetadata): CharSequence? {
+                val base = super.getNotificationContentText(metadata)
+                if (!listenTogetherController.active.value) return base
+                return listOfNotNull(togetherLine(listenTogetherController.state.value), base).joinToString(" · ")
+            }
+        }
+        // Listen Together and casting keep the service in the foreground while paused (onUpdateNotification below), but
+        // Media3's MediaNotificationManager.onNotificationUpdated, which runs when artwork finishes loading in the
+        // background, calls shouldRunInForeground(false) past that override. After Media3's 10-minute pause
+        // timeout that drops a paused listener to background, and on Android 12+ the cached process freezes and
+        // loses the room's WebSocket (casting: the media server and the speaker connection). So during a session
+        // or a cast the artwork callback asks for a full update instead, which goes through onUpdateNotification.
+        // Recursion: triggerNotificationUpdate runs createNotification inline on main (Util.postOrRun), and the
+        // artwork callback is always posted (Futures.addCallback on the session's handler). The round we start
+        // ourselves normally finds the artwork cached (no callback); if one still arrives it is dropped, so the
+        // redirect happens at most once per artwork load.
+        var redirectingArtwork = false
+        setMediaNotificationProvider(object : androidx.media3.session.MediaNotification.Provider by baseProvider {
+            override fun createNotification(
+                mediaSession: MediaSession,
+                mediaButtonPreferences: ImmutableList<CommandButton>,
+                actionFactory: androidx.media3.session.MediaNotification.ActionFactory,
+                onNotificationChangedCallback: androidx.media3.session.MediaNotification.Provider.Callback,
+            ): androidx.media3.session.MediaNotification {
+                val fromRedirect = redirectingArtwork
+                return baseProvider.createNotification(mediaSession, mediaButtonPreferences, actionFactory) { n ->
+                    when {
+                        !listenTogetherController.active.value && !isCasting -> onNotificationChangedCallback.onNotificationChanged(n)
+                        fromRedirect -> Unit
+                        else -> {
+                            redirectingArtwork = true
+                            try { triggerNotificationUpdate() } finally { redirectingArtwork = false }
+                        }
+                    }
+                }
+            }
+        })
+
+        val audioAttributes = AudioAttributes.Builder()
+            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+            .setUsage(C.USAGE_MEDIA)
+            .build()
+
+        // Generate an explicit audio session ID BEFORE building the player.
+        // ExoPlayer.audioSessionId returns 0 (global mix) by default until playback starts,
+        // which causes audio effect creation to fail with Error -3.
+        // By generating our own ID and passing it to the builder, the effects can attach immediately.
+        // Generate a dedicated audio session ID so audio effects can attach immediately.
+        val audioManager = getSystemService(android.media.AudioManager::class.java)
+        val audioSessionId = audioManager.generateAudioSessionId()
+        android.util.Log.i("LumaPlayback", "Generated audio session ID: $audioSessionId")
+
+        // Route ONLY YouTube-origin streaming items through the refresh chain
+        // (RefreshingDataSource → yt-dlp on 403). Background queue-fill seeds
+        // the timeline with cheap InnerTube/iOS placeholder URLs that 403 past
+        // ~1 MB; without this they surface as onPlayerError and skip-storm the
+        // queue. Lossless (Kennyy/Squid) and local/downloaded items stay on the
+        // default factory, unchanged.
+        val mediaSourceFactory = LumaMediaSourceFactory(
+            context = this,
+            streamingFactory = streamingMediaSourceFactory,
+            streamingTrackId = { item ->
+                val scheme = item.localConfiguration?.uri?.scheme?.lowercase()
+                val origin = item.mediaMetadata.extras?.getString(EXTRA_STREAM_ORIGIN)
+                val trackId = item.mediaMetadata.extras?.getLong(EXTRA_TRACK_ID, -1L) ?: -1L
+                if ((scheme == "http" || scheme == "https") && origin == "youtube" && trackId > 0L) {
+                    trackId
+                } else {
+                    null
+                }
+            },
+            // JioSaavn media is accepted only from its exact HTTPS CDN host.
+            // Its playback client disables redirects so a later range request
+            // cannot pivot from that validated host to another destination.
+            isJioSaavnOrigin = { item ->
+                val scheme = item.localConfiguration?.uri?.scheme?.lowercase()
+                val origin = item.mediaMetadata.extras?.getString(EXTRA_STREAM_ORIGIN)
+                (scheme == "http" || scheme == "https") &&
+                    origin == com.luma.core.media.streaming.JioSaavnStreamResolver.ORIGIN
+            },
+            httpClient = okHttpClient,
+            // Full-timeline queue: LUMA-resolve:// placeholders resolve
+            // just-in-time inside LazyResolvingDataSource at open().
+            resolver = streamResolver,
+            urlCache = streamUrlCache,
+            trackDao = trackDao,
+        )
+        this.mediaSourceFactory = mediaSourceFactory
+
+        // Two-player crossfade engine (role-swap). Both players build with
+        // handleAudioFocus = false; the engine manages audio focus manually so
+        // a single request covers whichever player is master across swaps.
+        val engine = CrossfadeEngine(
+            context = this,
+            buildPlayer = { buildExoPlayer(mediaSourceFactory, audioAttributes) },
+            scope = serviceScope,
+        )
+        engine.initialize()
+        crossfadeEngine = engine
+        // Listen Together: focus pauses bypass ListenTogetherPlayer AND carry no focus reason (see the
+        // CrossfadeEngine hooks). Outside a session events is null, so these do nothing.
+        engine.onFocusPause = { sessionPlayer.events?.onExternalPause() }
+        engine.onFocusResume = { sessionPlayer.events?.onExternalResume() }
+        val player = engine.masterPlayer
+        player.audioSessionId = audioSessionId
+
+        // Set session activity so tapping the media notification opens the app.
+        // The intent targets the app's launcher activity via the package's launch intent.
+        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+        val sessionActivity = if (launchIntent != null) {
+            android.app.PendingIntent.getActivity(
+                this, 0, launchIntent,
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
+            )
+        } else null
+
+        val sessionBuilder = MediaLibrarySession.Builder(this, player, LumaSessionCallback())
+            // #387: hand the platform session a throwaway copy of each artwork
+            // bitmap so an Android-15 AOSP ROM recycling media3's shared cached
+            // instance can't crash setMetadata. Wraps the default
+            // cache→datasource chain (kept, so artwork isn't re-decoded).
+            .setBitmapLoader(
+                SafeBitmapLoader(
+                    androidx.media3.session.CacheBitmapLoader(
+                        // Fetch notification / lock-screen artwork over the SHARED
+                        // OkHttp client rather than media3's own default HTTP stack.
+                        // The app's interceptors then apply here too — specifically
+                        // the Last.fm art fallback, without which a cover whose
+                        // upgraded variant 404s would show art in the app (Coil
+                        // walks the rungs) but none on the lock screen. Also buys
+                        // the resilient DNS and connection reuse.
+                        androidx.media3.datasource.DataSourceBitmapLoader(
+                            androidx.media3.datasource.DataSourceBitmapLoader.DEFAULT_EXECUTOR_SERVICE.get(),
+                            androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(okHttpClient),
+                        ),
+                    ),
+                ),
+            )
+        if (sessionActivity != null) {
+            sessionBuilder.setSessionActivity(sessionActivity)
+        }
+        val session = sessionBuilder.build()
+
+        mediaSession = session
+
+        // Per-track wiring (heart icon, loudness, prefetch) + transport/resume
+        // handling lives in [playerListener], attached to the current master
+        // and moved to the new master whenever the crossfade engine swaps.
+        player.addListener(playerListener)
+        listenedPlayer = player
+
+        // Cache crossfade prefs for the poll's prepare/fire decisions.
+        serviceScope.launch { crossfadePreference.enabled.collect { onCrossfadePreference(it) } }
+        serviceScope.launch { crossfadePreference.durationMs.collect { crossfadeDurationMs = it } }
+
+        // The service is up — tell the repository so it (re)connects its
+        // controller. This is the half the reverted design was missing: it
+        // makes state observation recover for playback the app didn't start
+        // (media button, Bluetooth, Android Auto).
+        playbackSessionBus.onServiceCreated()
+
+        // Idle self-stop: after IDLE_STOP_TIMEOUT_MS of no playback intent
+        // the service stops itself (see performIdleStop). Logged at the
+        // wiring site — the last idle design died precisely because a green
+        // unit suite said nothing about whether the watcher actually ran.
+        serviceScope.launch {
+            android.util.Log.i("LumaPlayback", "idle-stop watcher armed (timeout ${IDLE_STOP_TIMEOUT_MS}ms)")
+            idleStopTicker(playerIdle, IDLE_STOP_TIMEOUT_MS).collect { performIdleStop() }
+        }
+
+        // Closes a race: play() can land between performIdleStop's "stopping"
+        // signal and the repo's release — Media3 then restarts playback on
+        // THIS instance, so no onCreate re-announces the session and the repo
+        // would stay deaf while music plays. Any exit from idle re-announces.
+        serviceScope.launch {
+            playerIdle.collect { idle -> if (!idle) playbackSessionBus.onServiceCreated() }
+        }
+
+        // Sleep-timer status notification — separate from the media notification
+        // (Media3's default provider owns that one); mirrors the "Resuming…"
+        // placeholder notification's channel/build pattern below.
+        serviceScope.launch { observeSleepTimerState() }
+
+        // Listen Together (spec 2026-09-24 §5). Logged at the wiring site: green unit tests say nothing about this line.
+        // serviceScope is Dispatchers.Main.immediate, so the session (and enterSession/exitSession/configure) runs on main.
+        listenTogetherSession = com.luma.core.media.listen.ListenTogetherSession(
+            scope = serviceScope,
+            controller = listenTogetherController,
+            player = sessionPlayer,
+            catalog = listenTogetherCatalog,
+            api = roomApiClient,
+            connector = roomConnector,
+            autoplayRadio = { autoplayRadioPreference.enabled.first() },
+            displayName = { sharePreference.displayName() },
+            clock = { android.os.SystemClock.elapsedRealtime() },
+        ).also { it.start() }
+        listenTogetherController.serviceAttached = true
+        android.util.Log.i("LumaPlayback", "listen-together engine attached")
+        // The layout only differs by role, so rebuild it on a role change, not on every member or reaction update.
+        serviceScope.launch {
+            listenTogetherController.state
+                .map { (it as? com.luma.core.media.listen.ListenTogetherState.InRoom)?.isHost }
+                .distinctUntilChanged()
+                .collect { updateCustomLayout() }
+        }
+        // Who's in the room shows in the notification, so redraw it when someone joins or leaves.
+        serviceScope.launch {
+            listenTogetherController.state
+                .map { togetherLine(it) }
+                .distinctUntilChanged()
+                .collect { if (listenTogetherController.active.value) triggerNotificationUpdate() }
+        }
+
+        // Google Cast (spec 2026-10-06 §3). Logged at the wiring site.
+        android.util.Log.i("LumaPlayback", "cast attached")
+        serviceScope.launch {
+            castDevices.remote.collect { remote -> if (remote != null) enterCast(remote) else exitCast() }
+        }
+
+        updateCustomLayout()
+    }
+
+    /** Session-player listener while casting: idleness, the prefetch poll and presence follow the speaker. */
+    private val castListener = object : Player.Listener {
+        override fun onEvents(player: Player, events: Player.Events) {
+            if (!isCasting) return
+            if (events.contains(Player.EVENT_PLAYER_ERROR)) {
+                player.playerError?.let { playbackDiagnosticsLog.recordCast("speaker error: ${it.errorCodeName}") }
+            }
+            val idle = isPlayerIdle(player.playWhenReady, player.playbackState)
+            castIdleSinceMs = if (idle) castIdleSinceMs ?: android.os.SystemClock.elapsedRealtime() else null
+            playerIdle.value = idle
+            updateCastLocks(idle)
+            if (events.containsAny(Player.EVENT_IS_PLAYING_CHANGED, Player.EVENT_MEDIA_ITEM_TRANSITION)) {
+                updateDiscordPresence(player.currentMediaItem, player.isPlaying)
+                if (player.isPlaying) {
+                    startPrefetchPoll(player)
+                } else {
+                    prefetchPollJob?.cancel()
+                    prefetchPollJob = null
+                }
+            }
+        }
+    }
+
+    /**
+     * Hands playback to a cast speaker: stops the master where it is (the
+     * queue stays on it), serves its songs over the LAN and puts
+     * [com.luma.core.media.cast.CastSessionPlayer] on the session.
+     */
+    @OptIn(UnstableApi::class)
+    private fun enterCast(remote: com.luma.core.media.cast.CastRemote) {
+        if (isCasting) {
+            // A new receiver without a disconnect in between (a session the SDK
+            // resumed as a new one): follow it where the old one was, instead of
+            // driving a dead session.
+            val wrapper = castPlayer ?: return
+            if (!wrapper.isAttachedTo(remote)) {
+                val master = crossfadeEngine?.masterPlayer ?: return
+                android.util.Log.i("LumaPlayback", "cast: receiver changed, moving playback to it")
+                playbackDiagnosticsLog.recordCast("receiver changed")
+                wrapper.attach(master, remote, wrapper.currentPosition, wrapper.playWhenReady)
+            }
+            return
+        }
+        val engine = crossfadeEngine ?: return
+        // The two exclude each other (spec §3): Listen Together owns the player for the session.
+        if (listenTogetherController.active.value) {
+            android.util.Log.i("LumaPlayback", "cast: refused during Listen Together")
+            castDevices.disconnect()
+            return
+        }
+        val factory = mediaSourceFactory ?: return
+        val server = castServer ?: com.luma.core.media.cast.CastMediaServer(
+            audioSource = { entry -> factory.dataSourceFactoryFor(entry.payload as MediaItem).createDataSource() },
+            artworkSource = { androidx.media3.datasource.DefaultDataSource.Factory(this).createDataSource() },
+            onEvent = playbackDiagnosticsLog::recordCast,
+        ).also { castServer = it }
+        if (!server.start()) {
+            android.util.Log.w("LumaPlayback", "cast: no LAN address, disconnecting")
+            android.widget.Toast.makeText(this, R.string.cast_no_wifi, android.widget.Toast.LENGTH_LONG).show()
+            castDevices.disconnect()
+            return
+        }
+        setCrossfadeSuspended(true)
+        val master = engine.masterPlayer
+        val positionMs = master.currentPosition
+        val playWhenReady = master.playWhenReady
+        master.playWhenReady = false
+        master.stop() // keeps the queue and position; nothing plays or buffers on the phone
+        val wrapper = castPlayer ?: com.luma.core.media.cast.CastSessionPlayer(master, ::castMediaFor, ::prepareForCast)
+            .also { castPlayer = it }
+        wrapper.attach(master, remote, positionMs, playWhenReady)
+        wrapper.addListener(castListener)
+        mediaSession?.player = wrapper
+        val idle = isPlayerIdle(wrapper.playWhenReady, wrapper.playbackState)
+        castIdleSinceMs = if (idle) android.os.SystemClock.elapsedRealtime() else null
+        playerIdle.value = idle
+        updateCastLocks(idle)
+        android.util.Log.i("LumaPlayback", "cast: playing on the speaker from ${positionMs}ms")
+        playbackDiagnosticsLog.recordCast("playback moved to the speaker")
+        updateCustomLayout()
+        triggerNotificationUpdate()
+    }
+
+    /**
+     * Takes playback back from the speaker: the master gets the session and
+     * the speaker's position, paused. Stopping a cast must never start the
+     * phone's loudspeaker. Idempotent.
+     */
+    @OptIn(UnstableApi::class)
+    private fun exitCast() {
+        val wrapper = castPlayer?.takeIf { it.isAttached } ?: return
+        val handoff = wrapper.detach()
+        wrapper.removeListener(castListener)
+        castServer?.stop()
+        releaseCastLocks()
+        castIdleSinceMs = null
+        val master = crossfadeEngine?.masterPlayer
+        if (master != null) {
+            mediaSession?.player = master
+            if (handoff.mediaItemIndex in 0 until master.mediaItemCount) {
+                master.seekTo(handoff.mediaItemIndex, handoff.positionMs)
+            }
+            master.playWhenReady = false
+            if (master.mediaItemCount > 0) master.prepare()
+        }
+        setCrossfadeSuspended(false)
+        refreshPlayerIdle()
+        android.util.Log.i("LumaPlayback", "cast: back on the phone at ${handoff.positionMs}ms")
+        playbackDiagnosticsLog.recordCast("playback back on the phone")
+        updateCustomLayout()
+        triggerNotificationUpdate()
+    }
+
+    /** What the speaker loads for [item]: a LAN URL from [castServer], plus the metadata it shows. */
+    private fun castMediaFor(item: MediaItem, contentId: String): com.luma.core.media.cast.CastMedia? {
+        val server = castServer ?: return null
+        if (!server.ensureCurrentAddress()) return null // cast spec §4: follow a changed LAN address
+        val uri = item.localConfiguration?.uri ?: return null
+        val url = server.audioUrl(uri, item) ?: return null
+        val metadata = item.mediaMetadata
+        val extras = metadata.extras
+        return com.luma.core.media.cast.CastMedia(
+            contentId = contentId,
+            url = url,
+            contentType = castContentType(uri, extras?.getString(EXTRA_STREAM_CODEC)),
+            title = metadata.title?.toString(),
+            artist = metadata.artist?.toString(),
+            album = metadata.albumTitle?.toString(),
+            artworkUrl = server.artworkUrl(metadata.artworkUri),
+            durationMs = extras?.getLong(EXTRA_TRACK_DURATION_MS, 0L) ?: 0L,
+        )
+    }
+
+    /**
+     * Gets [item] ready before the speaker asks for it (cast spec §4), doing
+     * only what saves the speaker a wait or a failure:
+     *  - a stream that still has to be resolved (a LUMA-resolve placeholder
+     *    with no cached URL: lossless lookup, maybe yt-dlp for up to 45 s) is
+     *    resolved here, by opening its first byte through the same routing,
+     *    which fills the URL cache. Otherwise the speaker's own request would
+     *    wait on the resolve, and the speaker can give up first.
+     *  - a content:// file is opened once, so one whose folder access is gone
+     *    fails here, before the speaker is asked for it. Local, so cheap.
+     * Everything else (file://, a resolved or cached stream) is ready as it
+     * is: a test open would only add a network round trip to every song start.
+     */
+    private fun prepareForCast(item: MediaItem, done: (Boolean) -> Unit) {
+        val uri = item.localConfiguration?.uri
+        val scheme = uri?.scheme?.lowercase()
+        val factory = mediaSourceFactory
+        val needsOpen = when (scheme) {
+            "content" -> true
+            com.luma.core.media.streaming.LUMA_RESOLVE_SCHEME ->
+                uri.lastPathSegment?.toLongOrNull()?.let { streamUrlCache.get(it) } == null
+            else -> false
+        }
+        if (uri == null || factory == null || !needsOpen) {
+            done(true)
+            return
+        }
+        serviceScope.launch {
+            val ready = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                val source = factory.dataSourceFactoryFor(item).createDataSource()
+                try {
+                    source.open(androidx.media3.datasource.DataSpec.Builder().setUri(uri).setLength(1).build())
+                    true
+                } catch (e: Exception) { // IOException, or SecurityException for a content:// file
+                    android.util.Log.w("LumaPlayback", "cast: couldn't prepare a $scheme song: ${e.message}")
+                    false
+                } finally {
+                    runCatching { source.close() }
+                }
+            }
+            if (!ready) playbackDiagnosticsLog.recordCast("song prepare failed: $scheme")
+            done(ready)
+        }
+    }
+
+    /**
+     * Holds the cast locks only while the speaker plays (or is about to):
+     * a paused, ended or failed speaker asks the media server for nothing, so
+     * there is no reason to keep the CPU and Wi-Fi awake for it. Play takes
+     * them again as soon as the session reports it.
+     *
+     * Visibility is `internal` so unit tests can invoke it directly.
+     */
+    internal fun updateCastLocks(idle: Boolean) {
+        if (idle) releaseCastLocks() else acquireCastLocks()
+    }
+
+    /** The phone serves audio while the screen is off, so the CPU and Wi-Fi must stay awake. */
+    private fun acquireCastLocks() {
+        if (castWakeLock == null) {
+            castWakeLock = getSystemService(android.os.PowerManager::class.java)
+                .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "LUMA:cast")
+                .apply { setReferenceCounted(false); acquire() }
+        }
+        if (castWifiLock == null) {
+            // The same lock media3 takes for WAKE_MODE_NETWORK. Since Android 14
+            // the platform turns it into a LOW_LATENCY lock, which only holds
+            // while the app is in the foreground with the screen on, so with the
+            // screen off Wi-Fi may enter power save: slower replies to the
+            // speaker, but the connection stays. There is no stronger lock to
+            // ask for; the partial wake lock keeps the server itself running.
+            @Suppress("DEPRECATION")
+            castWifiLock = applicationContext.getSystemService(android.net.wifi.WifiManager::class.java)
+                ?.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "LUMA:cast")
+                ?.apply { setReferenceCounted(false); acquire() }
+        }
+    }
+
+    private fun releaseCastLocks() {
+        castWakeLock?.takeIf { it.isHeld }?.release()
+        castWakeLock = null
+        castWifiLock?.takeIf { it.isHeld }?.release()
+        castWifiLock = null
+    }
+
+    /**
+     * Reacts to [SleepTimerController.State] changes: posts/updates a quiet
+     * status notification while a timer is armed (ticking the remaining
+     * minutes every [SLEEP_TIMER_TICK_MS] for a Countdown), and cancels it
+     * once disarmed.
+     */
+    private suspend fun observeSleepTimerState() {
+        sleepTimerController.state.collect { state ->
+            sleepTimerNotificationJob?.cancel()
+            sleepTimerActive = state != SleepTimerController.State.Off
+            updateCustomLayout()
+            when (state) {
+                is SleepTimerController.State.Countdown -> {
+                    sleepTimerNotificationJob = serviceScope.launch {
+                        while (isActive) {
+                            val now = System.currentTimeMillis()
+                            val minutesLeft = ((state.endsAtMs - now) / 60_000L).coerceAtLeast(0) + 1
+                            showSleepTimerNotification("Pauses in about $minutesLeft min")
+                            if (state.endsAtMs <= now) break
+                            delay(SLEEP_TIMER_TICK_MS)
+                        }
+                    }
+                }
+                SleepTimerController.State.EndOfTrack -> {
+                    showSleepTimerNotification("Pauses when the current track ends")
+                }
+                SleepTimerController.State.Off -> cancelSleepTimerNotification()
+            }
+        }
+    }
+
+    /** Posts (or refreshes) the low-priority sleep-timer status notification. */
+    private fun showSleepTimerNotification(statusText: String) {
+        val nm = getSystemService(android.app.NotificationManager::class.java)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O &&
+            nm.getNotificationChannel(SLEEP_TIMER_CHANNEL_ID) == null
+        ) {
+            nm.createNotificationChannel(
+                android.app.NotificationChannel(
+                    SLEEP_TIMER_CHANNEL_ID,
+                    "Sleep timer",
+                    android.app.NotificationManager.IMPORTANCE_LOW,
+                ),
+            )
+        }
+        val notification = androidx.core.app.NotificationCompat.Builder(this, SLEEP_TIMER_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+            .setContentTitle("Sleep timer")
+            .setContentText(statusText)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_LOW)
+            .build()
+        nm.notify(SLEEP_TIMER_NOTIFICATION_ID, notification)
+    }
+
+    /** Cancels the sleep-timer status notification once the timer is disarmed. */
+    private fun cancelSleepTimerNotification() {
+        getSystemService(android.app.NotificationManager::class.java)
+            .cancel(SLEEP_TIMER_NOTIFICATION_ID)
+    }
+
+    /**
+     * Builds an [ExoPlayer] with LUMA's renderer/EQ chain, media-source
+     * factory and load control. Used for BOTH crossfade players. Audio focus is
+     * `false` (the [CrossfadeEngine] manages focus manually so it follows the
+     * master across swaps); becoming-noisy + wake stay on so whichever player is
+     * master pauses on unplug and holds the wake lock.
+     */
+    @OptIn(UnstableApi::class)
+    private fun buildExoPlayer(
+        mediaSourceFactory: LumaMediaSourceFactory,
+        audioAttributes: AudioAttributes,
+    ): ExoPlayer {
+        // Each player gets its OWN LoadControl. Media3 forbids two players
+        // sharing a LoadControl unless they also share a playback thread —
+        // the spare runs on its own thread, so a shared instance throws
+        // IllegalStateException on prepare(). Optimised buffer for local music:
+        // large buffers kill storage-I/O micro-stutters; low playback
+        // thresholds keep start-up snappy.
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                /* minBufferMs = */ 30_000,
+                /* maxBufferMs = */ 60_000,
+                /* bufferForPlaybackMs = */ 500, // LUMA: was 1 s; start sooner (rebuffer stays 2 s)
+                /* bufferForPlaybackAfterRebufferMs = */ 2_000,
+            )
+            .build()
+        val renderersFactory = LumaRenderersFactory(this, eqController, loudnessController)
+        val player = ExoPlayer.Builder(this)
+            .setRenderersFactory(renderersFactory)
+            .setMediaSourceFactory(mediaSourceFactory)
+            .setLoadControl(loadControl)
+            .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ false)
+            .setHandleAudioBecomingNoisy(true)
+            .setWakeMode(C.WAKE_MODE_LOCAL)
+            .build()
+        // Disabled DSP stages are dropped from the audio pipeline entirely
+        // (LumaRenderersFactory kdoc); this watcher re-applies the pipeline
+        // when a toggle crosses an active/inactive boundary so EQ/loudness
+        // changes still land mid-track.
+        renderersFactory.builtSink?.let { sink ->
+            watchDspActivation(serviceScope, eqController, loudnessController, player, sink)
+        }
+        return player
+    }
+
+    /**
+     * ~250 ms poll driving the crossfade. Each tick [evaluateCrossfade] primes
+     * the spare early and fires the fade at the seam. Runs only while the master
+     * is playing; the swap callback restarts it against the new master.
+     */
+    @OptIn(UnstableApi::class)
+    /**
+     * Starts the arm-poll — but only when crossfade is actually on.
+     *
+     * Every tick of this loop calls [evaluateCrossfade], whose first act is
+     * to return when `!crossfadeEnabled`. That check used to live INSIDE the
+     * tick, so a feature that is off by default still woke the service four
+     * times a second for the whole of every track, forever, to decide it had
+     * nothing to do. The gate belongs around the loop, and this is the one
+     * choke point all three call sites (transition, isPlaying, post-swap)
+     * route through. Flipping the pref on mid-playback is handled by
+     * [onCrossfadeEnabledChanged].
+     */
+    private fun startCrossfadePoll(player: Player) {
+        crossfadePollJob?.cancel()
+        crossfadePollJob = null
+        if (!crossfadeEnabled) return
+        crossfadePollJob = serviceScope.launch {
+            while (isActive && player.isPlaying) {
+                evaluateCrossfade(player)
+                delay(CROSSFADE_POLL_INTERVAL_MS)
+            }
+        }
+    }
+
+    /**
+     * Keeps the poll in step with the preference. Turning crossfade on
+     * mid-track has to start a poll that [startCrossfadePoll] would have
+     * refused to start while it was off; turning it off has to stop the one
+     * that is running rather than leaving it spinning until the track ends.
+     */
+    internal fun onCrossfadeEnabledChanged(enabled: Boolean) {
+        val wasEnabled = crossfadeEnabled
+        crossfadeEnabled = enabled
+        if (enabled == wasEnabled) return
+        val master = crossfadeEngine?.masterPlayer
+        if (enabled) {
+            if (master?.isPlaying == true) startCrossfadePoll(master)
+        } else {
+            crossfadePollJob?.cancel()
+            crossfadePollJob = null
+        }
+    }
+
+    /** Collector body for the crossfade preference; Listen Together can hold crossfade off without writing it. */
+    internal fun onCrossfadePreference(enabled: Boolean) {
+        crossfadePrefEnabled = enabled
+        onCrossfadeEnabledChanged(enabled && !crossfadeSuspended)
+    }
+
+    /** Suspends or restores crossfade for a Listen Together session. */
+    internal fun setCrossfadeSuspended(suspended: Boolean) {
+        crossfadeSuspended = suspended
+        if (suspended) {
+            crossfadeEngine?.cancelTransition()
+            crossfadePreparedId = null
+        }
+        onCrossfadeEnabledChanged(crossfadePrefEnabled && !suspended)
+    }
+
+    /** The effective crossfade switch (test view). */
+    internal val crossfadeActive: Boolean get() = crossfadeEnabled
+
+    /**
+     * One crossfade poll tick. Two phases, both no-ops unless crossfade is on
+     * and conditions hold:
+     *  - **prepare**: well before the seam (`fade + lead`), prime the spare on
+     *    the resolved next item so its readiness is never raced at fire time.
+     *  - **fire**: inside the fade window, once the spare is buffered, run the
+     *    equal-power fade + role-swap via [CrossfadeEngine.performTransition].
+     */
+    @OptIn(UnstableApi::class)
+    private fun evaluateCrossfade(player: Player) {
+        val engine = crossfadeEngine ?: return
+        if (!crossfadeEnabled || engine.isTransitioning()) return
+        if (player.repeatMode == Player.REPEAT_MODE_ONE) return
+        if (player.duration <= 0) return
+        // Everything below is wall-clock time, like the fade ramp itself: at 2x the last 6 s of
+        // the song are over in 3 s, and a fade timed in song time would cut it off halfway.
+        val speed = player.playbackParameters.speed
+        val duration = mediaToWallMs(player.duration, speed)
+        val fade = crossfadeDurationMs
+        if (duration <= 2 * fade) return // skip very short tracks
+        val nextIndex = player.nextMediaItemIndex
+        if (nextIndex == C.INDEX_UNSET) return
+        val nextItem = runCatching { player.getMediaItemAt(nextIndex) }.getOrNull() ?: return
+        if (!isNextResolved(nextItem)) return
+        val nextId = nextItem.mediaId
+        val remaining = mediaToWallMs(player.duration - player.currentPosition, speed)
+
+        // Phase 1 — prime the spare as soon as the next track is resolved and we
+        // are in the back stretch of the current one, so a COLD stream has tens
+        // of seconds to buffer (not just the few seconds before the seam). This
+        // is what makes streaming crossfade reliable.
+        if (remaining <= PREPARE_AT_MS && !engine.isPreparedFor(nextId)) {
+            engine.prepareNext(nextItem)
+            crossfadePreparedId = nextId
+        }
+
+        // Phase 2 — fire only when the spare has buffered at least the fade
+        // length ahead, so it can't stall mid-fade (a barely-READY spare
+        // glitches on cold streams). Buffer is song time: the fade plays fade × speed of it.
+        if (remaining <= fade && engine.isPreparedFor(nextId) &&
+            engine.spareBufferedMs() >= wallToMediaMs(fade, speed)
+        ) {
+            val fadeMs = minOf(fade, remaining - HANDOFF_MARGIN_MS)
+            if (fadeMs >= MIN_FADE_MS) {
+                crossfadePollJob?.cancel() // swap restarts the poll on the new master
+                engine.performTransition(fadeMs) { newMaster -> onCrossfadeSwap(newMaster) }
+            }
+        }
+    }
+
+    /**
+     * Promotes the incoming player to master after a crossfade: re-points the
+     * MediaSession, moves [playerListener], re-runs per-track wiring for the new
+     * current item, and restarts the polls. Invoked on the main thread by the
+     * engine at the end of the fade.
+     */
+    @OptIn(UnstableApi::class)
+    private fun onCrossfadeSwap(newMaster: ExoPlayer) {
+        mediaSession?.player = newMaster
+        listenedPlayer?.removeListener(playerListener)
+        newMaster.addListener(playerListener)
+        listenedPlayer = newMaster
+        crossfadePreparedId = null
+        onTrackTransitionForLoudness(newMaster.currentMediaItem)
+        updateDiscordPresence(newMaster.currentMediaItem, newMaster.isPlaying)
+        updateCustomLayout()
+        prefetchOrchestrator.resetSession()
+        // Re-read idleness from the NEW master directly: the fade's
+        // pauseAtEndOfMediaItems flipped the OLD master's playWhenReady while
+        // the listener was still attached to it, and no event fires on the
+        // new master until its next state change — without this the shutdown
+        // countdown would arm in the middle of audible playback.
+        playerIdle.value = isPlayerIdle(newMaster.playWhenReady, newMaster.playbackState)
+        if (newMaster.isPlaying) {
+            startPrefetchPoll(newMaster)
+            startCrossfadePoll(newMaster)
+        }
+    }
+
+    /**
+     * Publishes the master player's idleness into [playerIdle]. Skipped while
+     * a crossfade transition is running — the engine deliberately pauses the
+     * outgoing player mid-fade, and reading that as "user stopped listening"
+     * would arm the shutdown countdown during audible playback.
+     * [onCrossfadeSwap] re-reads from the new master once the swap lands.
+     */
+    private fun refreshPlayerIdle() {
+        if (crossfadeEngine?.isTransitioning() == true) return
+        val master = activePlayer ?: return
+        playerIdle.value = isPlayerIdle(master.playWhenReady, master.playbackState)
+    }
+
+    /**
+     * Stops the service after the idle timeout. The repository is told first
+     * so it releases its MediaController — that binding would otherwise keep
+     * a stopped service alive indefinitely. Clients that are still genuinely
+     * bound (Android Auto in a moving car) keep the service alive through
+     * `stopSelf()` exactly as bindings are meant to; the ticker re-fires and
+     * this retries after they unbind.
+     *
+     * Resume paths from the stopped state are all pre-existing and
+     * device-proven: media button / Bluetooth ride `onPlaybackResumption`,
+     * and the in-app play button falls back to `resumeLastQueue()` when it
+     * finds an empty timeline.
+     */
+    private fun performIdleStop() {
+        // A paused listener, or a host in a long pause, must not drop out of the session (spec §5).
+        if (listenTogetherController.active.value) return
+        val master = activePlayer
+        if (master != null && !isPlayerIdle(master.playWhenReady, master.playbackState)) {
+            // Belt and braces: the ticker's view lagged reality somehow.
+            return
+        }
+        // A paused speaker gets CAST_IDLE_STOP_TIMEOUT_MS; the ticker keeps
+        // re-firing every IDLE_STOP_TIMEOUT_MS until then.
+        if (isCasting) {
+            val idleFor = android.os.SystemClock.elapsedRealtime() - (castIdleSinceMs ?: return)
+            if (idleFor < CAST_IDLE_STOP_TIMEOUT_MS) return
+        }
+        android.util.Log.i(
+            "LumaPlayback",
+            "idle-stop: no playback for ${IDLE_STOP_TIMEOUT_MS}ms — stopping service",
+        )
+        playbackSessionBus.onServiceStopping()
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    /**
+     * Whether [item] is playable right now (so a fade into it won't error).
+     * Local/downloaded items (file/content URIs) always are. A streaming item
+     * is only playable once a resolver has produced its URL, which stamps
+     * [EXTRA_STREAM_ORIGIN] — placeholder queue-fill http(s) URLs lack it.
+     */
+    private fun isNextResolved(item: MediaItem): Boolean {
+        val scheme = item.localConfiguration?.uri?.scheme?.lowercase() ?: return false
+        return if (scheme == "http" || scheme == "https") {
+            item.mediaMetadata.extras?.getString(EXTRA_STREAM_ORIGIN) != null
+        } else {
+            true
+        }
+    }
+
+    /**
+     * Posts a lightweight "Resuming…" foreground notification so a
+     * media-button-triggered resumption (started via startForegroundService
+     * on a dead process) satisfies the OS ~5s "must call startForeground"
+     * deadline even when the current track needs a slow stream-URL resolve.
+     *
+     * Reuses Media3's default notification id so the real media notification
+     * replaces this placeholder seamlessly once playback starts — no
+     * lingering "Resuming…" entry.
+     */
+    @OptIn(UnstableApi::class)
+    private fun showResumingForegroundNotification() {
+        val channelId = "stash_playback_resume"
+        val nm = getSystemService(android.app.NotificationManager::class.java)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O &&
+            nm.getNotificationChannel(channelId) == null
+        ) {
+            nm.createNotificationChannel(
+                android.app.NotificationChannel(
+                    channelId,
+                    getString(R.string.resuming_channel_name),
+                    android.app.NotificationManager.IMPORTANCE_LOW,
+                ),
+            )
+        }
+        val notification = androidx.core.app.NotificationCompat.Builder(this, channelId)
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setContentTitle(getString(R.string.resuming_notification_title))
+            .setOngoing(true)
+            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_LOW)
+            .build()
+        val id = androidx.media3.session.DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            startForeground(
+                id,
+                notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+            )
+        } else {
+            startForeground(id, notification)
+        }
+    }
+
+    /**
+     * Cancels any existing prefetch poll and starts a new one that ticks
+     * every [PREFETCH_POLL_INTERVAL_MS]. Each tick reads the current
+     * playback position and the *next* queue item's mediaId off the
+     * player on the main thread, then hands those to
+     * [PrefetchOrchestrator.onPlaybackProgress] which decides whether to
+     * launch a resolve.
+     *
+     * The poll runs as long as the player reports `isPlaying = true`.
+     * `onIsPlayingChanged(false)` cancels it; `onMediaItemTransition`
+     * cancels + restarts it so a new "next" target is picked up
+     * immediately after auto-advance.
+     */
+    @OptIn(UnstableApi::class)
+    private fun startPrefetchPoll(player: Player) {
+        prefetchPollJob?.cancel()
+        prefetchPollJob = serviceScope.launch {
+            while (isActive && player.isPlaying) {
+                val nextIndex = player.nextMediaItemIndex
+                val nextId = if (nextIndex == C.INDEX_UNSET) {
+                    null
+                } else {
+                    runCatching { player.getMediaItemAt(nextIndex) }
+                        .getOrNull()
+                        ?.mediaId
+                        ?.toLongOrNull()
+                }
+                prefetchOrchestrator.onPlaybackProgress(
+                    scope = serviceScope,
+                    nextTrackId = nextId,
+                    positionMs = player.currentPosition,
+                    durationMs = player.duration,
+                )
+                delay(PREFETCH_POLL_INTERVAL_MS)
+            }
+        }
+    }
+
+    /**
+     * Pushes now-playing state to Discord (no-op if not connected). Only
+     * uses artwork already served over http(s) — LUMA has no local-art
+     * upload path to Discord (unlike downloaded/offline covers, which stay
+     * as file:// and just fall back to the app icon).
+     */
+    private fun updateDiscordPresence(mediaItem: MediaItem?, isPlaying: Boolean) {
+        val metadata = mediaItem?.mediaMetadata
+        val title = metadata?.title?.toString().orEmpty()
+        if (title.isBlank()) {
+            discordRpcCoordinator.updateNowPlaying("", "", "", null, 0L, 0L, isPlaying = false)
+            return
+        }
+        val artist = metadata?.artist?.toString().orEmpty()
+        val album = metadata?.albumTitle?.toString().orEmpty()
+        val artScheme = metadata?.artworkUri?.scheme?.lowercase()
+        val artUrl = metadata?.artworkUri?.toString()
+            ?.takeIf { artScheme == "http" || artScheme == "https" }
+        val master = activePlayer
+        val positionMs = master?.currentPosition ?: 0L
+        val durationMs = master?.duration?.takeIf { it > 0 } ?: 0L
+        discordRpcCoordinator.updateNowPlaying(title, artist, album, artUrl, positionMs, durationMs, isPlaying)
+    }
+
+    /**
+     * Test-visible per-transition hook for loudness gain. Resolves the
+     * media item to a track row (matching the heart-button's
+     * `mediaId.toLongOrNull()` convention) and pushes the computed gain
+     * to [LoudnessController]. No-ops when the id can't be parsed, the
+     * row is missing, or the track has no measured loudness yet — in
+     * those cases [computeGain] returns 0 dB which is the safe bypass.
+     *
+     * Visibility is `internal` so unit tests can invoke the hook directly
+     * without booting a full [MediaLibraryService] / [ExoPlayer].
+     */
+    internal fun onTrackTransitionForLoudness(mediaItem: MediaItem?) {
+        val trackId = mediaItem?.mediaId?.toLongOrNull() ?: return
+        serviceScope.launch {
+            val track = trackDao.getById(trackId) ?: return@launch
+            val gainDb = computeGain(track.loudnessLufs, track.truePeakDbfs)
+            loudnessController.setCurrentTrackGain(gainDb)
+        }
+    }
+
+    private var lastTrackId: Long? = null
+    private var lastIsLiked: Boolean = false
+    @Volatile private var sleepTimerActive: Boolean = false
+
+    /**
+     * Updates the MediaSession custom layout with the heart, shuffle, and repeat icons.
+     * Starts a database observer for the current track's like state. For player-state
+     * changes (repeat/shuffle) on the same track, it refreshes the layout using the
+     * last known like state to avoid redundant DB observer restarts.
+     */
+    @OptIn(UnstableApi::class)
+    private fun updateCustomLayout() {
+        val session = mediaSession ?: return
+        val player = session.player
+        val mediaItem = player.currentMediaItem
+        val trackId = mediaItem?.mediaId?.toLongOrNull()
+        val youtubeId = mediaItem?.mediaMetadata?.extras?.getString(EXTRA_TRACK_YOUTUBE_ID)
+
+        if (trackId == null) {
+            likeObserverJob?.cancel()
+            lastTrackId = null
+            lastIsLiked = false
+            session.setCustomLayout(ImmutableList.of())
+            return
+        }
+
+        if (trackId != lastTrackId) {
+            likeObserverJob?.cancel()
+            lastTrackId = trackId
+            // Reset liked state and push an initial layout immediately for the new track.
+            // This prevents the previous track's heart state from lingering until the
+            // DB observer emits for the first time.
+            lastIsLiked = false
+            pushLayout(session, player, false)
+
+            likeObserverJob = serviceScope.launch {
+                // The id-keyed observer doesn't match streaming-engine
+                // synthetic ids; fall back to youtube_id so the heart
+                // tracks Room's truth even for stream-only tracks. The
+                // service stays in sync with Now Playing's optimistic
+                // flip because `MusicRepository.ensureTrackPersisted`
+                // writes a row with the same `youtube_id` on like.
+                val likeFlow = trackDao.observeLikeState(trackId)
+                    .flatMapLatest { state ->
+                        if (state != null || youtubeId.isNullOrBlank()) flowOf(state)
+                        else trackDao.observeLikeStateByYoutubeId(youtubeId)
+                    }
+                likeFlow.collect { state ->
+                    val isLiked = state?.lumaLikedAt != null
+                    if (isLiked != lastIsLiked) {
+                        lastIsLiked = isLiked
+                        pushLayout(session, player, lastIsLiked)
+                    }
+                }
+            }
+        } else {
+            pushLayout(session, player, lastIsLiked)
+        }
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun pushLayout(session: MediaSession, player: Player, isLiked: Boolean) {
+        val together = if (::listenTogetherController.isInitialized) listenTogetherController.state.value else null
+        val buttons = mutableListOf<CommandButton>()
+        when {
+            // A listener's notification shows only Leave (spec §5); repeat does nothing in a one-song session.
+            together is com.luma.core.media.listen.ListenTogetherState.InRoom && !together.isHost ->
+                buttons.add(buildLeaveSessionButton())
+            together is com.luma.core.media.listen.ListenTogetherState.InRoom -> {
+                buttons.add(buildLikeButton(isLiked))
+                buttons.add(buildLeaveSessionButton())
+            }
+            else -> {
+                buttons.add(buildLikeButton(isLiked))
+                buttons.add(buildRepeatButton(player.repeatMode))
+            }
+        }
+        if (sleepTimerActive) buttons.add(buildStopSleepTimerButton())
+        session.setCustomLayout(ImmutableList.copyOf(buttons))
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun buildLeaveSessionButton(): CommandButton = CommandButton.Builder()
+        .setDisplayName("Leave session")
+        .setIconResId(R.drawable.ic_listen_leave)
+        .setSessionCommand(SessionCommand(COMMAND_LEAVE_SESSION, android.os.Bundle.EMPTY))
+        .build()
+
+    @OptIn(UnstableApi::class)
+    private fun buildStopSleepTimerButton(): CommandButton {
+        return CommandButton.Builder()
+            .setDisplayName("Stop timer")
+            .setIconResId(R.drawable.ic_timer_off)
+            .setSessionCommand(
+                SessionCommand(COMMAND_STOP_SLEEP_TIMER, android.os.Bundle.EMPTY),
+            )
+            .build()
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun buildRepeatButton(repeatMode: Int): CommandButton {
+        val iconRes = when (repeatMode) {
+            Player.REPEAT_MODE_OFF -> R.drawable.ic_repeat_off
+            Player.REPEAT_MODE_ONE -> R.drawable.ic_repeat_one
+            else -> R.drawable.ic_repeat
+        }
+        val displayNameRes = when (repeatMode) {
+            Player.REPEAT_MODE_OFF -> R.string.notification_action_repeat_off
+            Player.REPEAT_MODE_ALL -> R.string.notification_action_repeat_all
+            Player.REPEAT_MODE_ONE -> R.string.notification_action_repeat_one
+            else -> R.string.notification_action_repeat_off
+        }
+        return CommandButton.Builder()
+            .setDisplayName(getString(displayNameRes))
+            .setIconResId(iconRes)
+            .setSessionCommand(
+                SessionCommand(COMMAND_CYCLE_REPEAT, android.os.Bundle.EMPTY),
+            )
+            .build()
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun buildLikeButton(isLiked: Boolean): CommandButton {
+        val iconRes = if (isLiked) {
+            R.drawable.ic_notification_heart_filled
+        } else {
+            R.drawable.ic_notification_heart_outlined
+        }
+        val displayNameRes = if (isLiked) {
+            R.string.notification_action_unlike
+        } else {
+            R.string.notification_action_like
+        }
+        return CommandButton.Builder()
+            .setDisplayName(getString(displayNameRes))
+            .setIconResId(iconRes)
+            .setSessionCommand(
+                SessionCommand(COMMAND_TOGGLE_LIKE, android.os.Bundle.EMPTY),
+            )
+            .build()
+    }
+
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? {
+        return mediaSession
+    }
+
+    /**
+     * During a session, or while casting, the notification stays in the foreground even while paused (spec §5;
+     * cast spec §3: a frozen process can't serve the speaker its next song). The ceiling: Android 16
+     * still demotes a media service paused for 10 minutes (system `setFgsInactiveLocked`; device test 2026-09-25)
+     * and Media3 can't restart it from the background, so a long pause holds only while the process lives. Play from
+     * the notification or a media button is exempt and brings the foreground back.
+     */
+    @OptIn(UnstableApi::class)
+    override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
+        val inSession = ::listenTogetherController.isInitialized && listenTogetherController.active.value
+        super.onUpdateNotification(session, startInForegroundRequired || inSession || isCasting)
+    }
+
+    @OptIn(UnstableApi::class)
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (listenTogetherController.active.value) return // swiping the app away doesn't leave the session
+        val player = mediaSession?.player
+        if (player == null || !player.playWhenReady || player.mediaItemCount == 0) {
+            stopSelf()
+        }
+    }
+
+    override fun onDestroy() {
+        // Quiet exit: shutdown() ends the session WITHOUT sessionEnds, so PlayerRepositoryImpl doesn't restore
+        // the queue into (and possibly restart) this dying service. The next launch's cold-start restore
+        // brings the user's queue back; it was never saved over during the session.
+        listenTogetherSession?.shutdown()
+        listenTogetherSession = null
+        if (::listenTogetherController.isInitialized) listenTogetherController.serviceAttached = false
+        // Idempotent with performIdleStop's signal; covers every OTHER death
+        // path (swipe-away, system kill) so the repo never holds a controller
+        // for a session that no longer exists.
+        playbackSessionBus.onServiceStopping()
+        likeObserverJob?.cancel()
+        prefetchPollJob?.cancel()
+        crossfadePollJob?.cancel()
+        sleepTimerNotificationJob?.cancel()
+        cancelSleepTimerNotification()
+        listenedPlayer?.removeListener(playerListener)
+        listenedPlayer = null
+        // The speaker would play out its one song and stop; end the cast cleanly instead.
+        if (isCasting) castDevices.disconnect()
+        castServer?.stop()
+        releaseCastLocks()
+        serviceScope.cancel()
+        // Release the session before the players; the engine owns BOTH players.
+        mediaSession?.release()
+        crossfadeEngine?.release()
+        crossfadeEngine = null
+        mediaSession = null
+        super.onDestroy()
+    }
+
+    /**
+     * Resolves the Room PK for a Like-toggle from MediaSession state. The
+     * `mediaId` may be a v0.9.30 streaming-engine synthetic id
+     * (`videoId.hashCode().toLong()`) that doesn't exist in `tracks` —
+     * passing it to a FK-bearing write crashes the service. Mirrors the
+     * upsert pattern in `MusicRepositoryImpl.ensureTrackPersisted` /
+     * `SearchDownloadCoordinator.upsertSearchTrack`.
+     *
+     * @return the real `tracks.id` to use; never returns a synthetic id.
+     * @throws IllegalStateException when no identity info is recoverable
+     *   from the MediaItem (i.e. neither a real candidate id nor a
+     *   youtubeId / title / artist that maps to one).
+     */
+    private suspend fun resolveTrackIdForLike(
+        candidateId: Long,
+        youtubeId: String?,
+        metadata: MediaMetadata,
+    ): Long {
+        // Real Room PK already? Cheap exit.
+        if (candidateId > 0L && trackDao.getById(candidateId) != null) return candidateId
+
+        // YouTube id is the most reliable secondary identity.
+        if (!youtubeId.isNullOrBlank()) {
+            trackDao.findByYoutubeId(youtubeId)?.let { return it.id }
+        }
+
+        val title = metadata.title?.toString().orEmpty()
+        val artist = metadata.artist?.toString().orEmpty()
+        val album = metadata.albumTitle?.toString().orEmpty()
+        val albumArtist = metadata.albumArtist?.toString().orEmpty()
+        val cTitle = canonicalizeIdentity(title)
+        val cArtist = canonicalizeIdentity(artist)
+
+        if (cTitle.isNotBlank() && cArtist.isNotBlank()) {
+            trackDao.findByCanonicalIdentity(cTitle, cArtist)?.let { return it.id }
+        }
+
+        check(title.isNotBlank() && artist.isNotBlank()) {
+            "Cannot resolve track id for like: no youtubeId and no title/artist metadata"
+        }
+
+        return trackDao.insert(
+            TrackEntity(
+                title = title,
+                artist = artist,
+                album = album,
+                albumArtist = albumArtist,
+                youtubeId = youtubeId,
+                canonicalTitle = cTitle,
+                canonicalArtist = cArtist,
+                source = com.luma.core.model.MusicSource.YOUTUBE,
+                isStreamable = true,
+                isDownloaded = false,
+            )
+        )
+    }
+
+    private fun canonicalizeIdentity(s: String): String =
+        s.lowercase()
+            .replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+    private val sessionPlayer = ServiceSessionPlayer()
+
+    /** The Listen Together engine's hands on the master player (spec §5 "New player abilities"). Main thread. */
+    @OptIn(UnstableApi::class)
+    private inner class ServiceSessionPlayer : com.luma.core.media.listen.SessionPlayer {
+        // Crossfade is suspended for the whole session, so the master never swaps under us.
+        private val master: ExoPlayer get() = checkNotNull(crossfadeEngine).masterPlayer
+        override var events: com.luma.core.media.listen.SessionPlayerEvents? = null
+
+        override fun userQueue(): com.luma.core.media.listen.UserQueue {
+            val m = master
+            val timeline = m.currentTimeline
+            // Upcoming songs in play order (shuffle included), as the user would have heard them.
+            val upcoming = if (timeline.isEmpty) emptyList() else buildList {
+                var i = m.currentMediaItemIndex
+                while (size < 200) {
+                    i = timeline.getNextWindowIndex(i, Player.REPEAT_MODE_OFF, m.shuffleModeEnabled)
+                    if (i == C.INDEX_UNSET) break
+                    add(m.getMediaItemAt(i))
+                }
+            }
+            return com.luma.core.media.listen.UserQueue(m.currentMediaItem, upcoming, m.currentPosition.coerceAtLeast(0))
+        }
+
+        override suspend fun saveUserPosition() {
+            // The queue ids are already saved on every change; only the position may lag, by up to 5 s.
+            val saved = playbackStateStore.getLastPlaybackState() ?: return
+            val m = master
+            val currentId = m.currentMediaItem?.mediaMetadata?.extras?.getLong(EXTRA_TRACK_ID, -1L) ?: return
+            if (currentId == saved.trackId) {
+                playbackStateStore.savePosition(saved.trackId, m.currentPosition.coerceAtLeast(0), saved.queueIndex)
+            }
+        }
+
+        override fun enterSession(isHost: Boolean, interceptor: com.luma.core.media.listen.SessionInterceptor) {
+            // Cast and Listen Together exclude each other (cast spec §3): the session takes the player back first.
+            if (isCasting) {
+                exitCast()
+                castDevices.disconnect()
+            }
+            setCrossfadeSuspended(true)
+            val m = master
+            // The session player holds one song, and the room decides what comes next (spec §4).
+            m.repeatMode = Player.REPEAT_MODE_OFF
+            m.shuffleModeEnabled = false
+            val wrapper = togetherPlayer?.also { it.rewrap(m) }
+                ?: com.luma.core.media.listen.ListenTogetherPlayer(m).also { togetherPlayer = it }
+            wrapper.configure(isHost, interceptor)
+            if (togetherListener == null) { // entering the session, not a role change
+                // The room plays at 1x and drift correction steers the speed from here, so a sped-up
+                // song mustn't carry in. (Here, not through the controller, whose command could land
+                // after the wrapper below, which ignores it.)
+                m.setPlaybackSpeed(1f)
+                // A listener waits for the room's first load: never show the user's own song meanwhile.
+                // The session has already saved its position, and saves are gated while active.
+                if (!isHost) { m.stop(); m.clearMediaItems() }
+                togetherListener = object : Player.Listener {
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        when (playbackState) {
+                            Player.STATE_READY -> events?.onReady()
+                            Player.STATE_BUFFERING -> events?.onBuffering()
+                            Player.STATE_ENDED -> events?.onEnded()
+                        }
+                    }
+
+                    override fun onPlayerError(error: PlaybackException) {
+                        events?.onError()
+                    }
+
+                    // Pauses that bypass ListenTogetherPlayer. Unplugging headphones is ExoPlayer's own
+                    // setHandleAudioBecomingNoisy(true), reported as AUDIO_BECOMING_NOISY. Audio focus is NOT
+                    // ExoPlayer's here: both players build with handleAudioFocus = false and CrossfadeEngine
+                    // handles focus by hand, setting playWhenReady directly, so a call's pause and the
+                    // self-resume after a transient loss both arrive as USER_REQUEST. Those come through
+                    // CrossfadeEngine.onFocusPause and onFocusResume (wired in onCreate) instead.
+                    // AUDIO_FOCUS_LOSS is kept so the pause is still caught if ExoPlayer ever owns focus.
+                    override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                        if (!playWhenReady && (
+                                reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY ||
+                                    reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS)
+                        ) events?.onExternalPause()
+                    }
+                }.also { m.addListener(it) }
+            }
+            mediaSession?.player = wrapper
+            // Keep the notification (and so the foreground service) even while the one song is idle or failed.
+            setShowNotificationForIdlePlayer(androidx.media3.session.MediaSessionService.SHOW_NOTIFICATION_FOR_IDLE_PLAYER_ALWAYS)
+            updateCustomLayout()
+            triggerNotificationUpdate()
+        }
+
+        override fun exitSession() {
+            val m = master
+            togetherListener?.let { m.removeListener(it) }
+            togetherListener = null
+            togetherPlayer?.configure(isHost = false, interceptor = null)
+            // Empty the player BEFORE the MediaSession gets the bare ExoPlayer back: controllers must never
+            // see the session's song as the user's queue (PlayerRepositoryImpl would save it over theirs).
+            m.setPlaybackSpeed(1f)
+            m.playWhenReady = false // the restored queue must come back paused, never auto-playing
+            m.stop()
+            m.clearMediaItems() // PlayerRepositoryImpl puts the user's own queue back on sessionEnds
+            mediaSession?.player = m
+            setCrossfadeSuspended(false)
+            setShowNotificationForIdlePlayer(androidx.media3.session.MediaSessionService.SHOW_NOTIFICATION_FOR_IDLE_PLAYER_AFTER_STOP_OR_ERROR)
+            updateCustomLayout()
+            triggerNotificationUpdate()
+        }
+
+        override fun load(item: MediaItem, positionMs: Long) {
+            val m = master
+            m.playWhenReady = false
+            m.setMediaItem(item, positionMs)
+            m.prepare()
+        }
+
+        override fun seekTo(positionMs: Long) = master.seekTo(positionMs)
+        override fun play() = master.play()
+        override fun pause() = master.pause()
+
+        /** Player.setPlaybackSpeed keeps pitch at 1, so Sonic time-stretches (spec §4). */
+        override fun setSpeed(speed: Float) = master.setPlaybackSpeed(speed)
+
+        override val positionMs: Long get() = master.currentPosition
+        override val durationMs: Long? get() = master.duration.takeIf { it != C.TIME_UNSET && it > 0 }
+        override val ended: Boolean get() = master.playbackState == Player.STATE_ENDED
+    }
+
+    // ---- MediaLibrarySession.Callback ----
+
+    private inner class LumaSessionCallback : MediaLibrarySession.Callback {
+
+        private suspend fun resolveMediaItem(item: MediaItem): MediaItem {
+            // 1. If it's already a fully resolved item (has URI), use it
+            if (item.localConfiguration?.uri != null) {
+                return item
+            }
+
+            // 2. If it's a library item (has mediaId), resolve it from DB.
+            // Downloaded tracks get their file URI; stream tracks get a
+            // LUMA-resolve:// placeholder resolved just-in-time by
+            // LazyResolvingDataSource (Android Auto taps never pass through
+            // PlayerRepositoryImpl, so nothing is "pre-resolved upstream" —
+            // the old absent-URI fallthrough was why car taps didn't play).
+            val trackId = item.mediaId.toLongOrNull()
+            if (trackId != null) {
+                val track = trackDao.getById(trackId)
+                if (track != null) {
+                    return track.toAutoMediaItem(mediaId = item.mediaId)
+                }
+            }
+
+            // 3. Fallback to request metadata URI (with security check)
+            val uri = item.requestMetadata.mediaUri
+            if (uri != null) {
+                val scheme = uri.scheme
+                if (scheme == "file" || scheme == "android.resource" || scheme == "content") {
+                    return item.buildUpon().setUri(uri).build()
+                }
+            }
+
+            return item
+        }
+
+        @OptIn(UnstableApi::class)
+        override fun onSetMediaItems(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            mediaItems: List<MediaItem>,
+            startIndex: Int,
+            startPositionMs: Long,
+        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+            crossfadeEngine?.cancelTransition()
+            crossfadePreparedId = null
+            return serviceScope.future {
+                if (mediaItems.size == 1 && mediaItems[0].mediaId.startsWith(SHUFFLE_PLAY_PREFIX)) {
+                    val tracks = shuffleSourceTracks(mediaItems[0].mediaId)
+                    if (tracks != null) {
+                        val items = tracks.map { it.toAutoMediaItem() }.shuffled()
+
+                        kotlinx.coroutines.withContext(Dispatchers.Main) {
+                            mediaSession.player.shuffleModeEnabled = true
+                        }
+
+                        return@future MediaSession.MediaItemsWithStartPosition(
+                            items,
+                            0,
+                            C.TIME_UNSET
+                        )
+                    }
+                }
+                // Browse-tap on a playlist/recently-added child (#154/#173):
+                // the mediaId carries its parent, so rebuild the whole parent
+                // as the queue, starting at the tapped track — mirroring the
+                // SHUFFLE_PLAY_ expansion above, but in order and unshuffled.
+                if (mediaItems.size == 1) {
+                    val parsed = AutoBrowseQueue.parse(mediaItems[0].mediaId)
+                    if (parsed != null) {
+                        val plan = AutoBrowseQueue.queuePlan(
+                            tracksForBrowseParent(parsed.parentId),
+                            tappedTrackId = parsed.trackId,
+                        )
+                        if (plan.tracks.isNotEmpty()) {
+                            val items = plan.tracks.map { it.toAutoMediaItem() }
+                            // An explicit in-order tap means in-order playback;
+                            // shuffle stays reachable via the Shuffle Play entry.
+                            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                mediaSession.player.shuffleModeEnabled = false
+                            }
+                            return@future MediaSession.MediaItemsWithStartPosition(
+                                items,
+                                plan.startIndex,
+                                C.TIME_UNSET,
+                            )
+                        }
+                    }
+                }
+                val resolvedItems = mediaItems.map { resolveMediaItem(it) }
+                MediaSession.MediaItemsWithStartPosition(resolvedItems, startIndex, startPositionMs)
+            }
+        }
+
+        /**
+         * Loads the track list backing an Auto browse parent id — the same
+         * rows (and order) `onGetChildren` listed for it.
+         */
+        private suspend fun tracksForBrowseParent(parentId: String): List<TrackEntity> =
+            when {
+                parentId.startsWith(PLAYLIST_PREFIX) ->
+                    parentId.removePrefix(PLAYLIST_PREFIX).toLongOrNull()
+                        ?.let { playlistDao.getTracksForPlaylist(it) }
+                        // Same predicate as onGetChildren so the queue built
+                        // from a tap matches the rows the car listed.
+                        ?.filter { it.isPlayableInAuto() }
+                        ?: emptyList()
+                parentId == LIKED_ID -> likedTracksForAuto()
+                parentId == RECENTLY_ADDED_ID -> trackDao.getRecentlyAdded(20).first()
+                else -> emptyList()
+            }
+
+        /**
+         * The car's ONE "Liked Songs" entry: every likes playlist the car lists
+         * (in-app likes + each synced likes list) merged, newest like first —
+         * the Library's Liked tab in the car. The first head-unit test of #251
+         * saw two "Liked Songs" rows because both playlists carry that name.
+         */
+        private suspend fun likedTracksForAuto(): List<TrackEntity> {
+            val liked = playlistDao.getAllVisible(includeStreamable = false).first()
+                .filter { it.isLikedPlaylist() }
+            return mergeLikedForAuto(liked.map { playlistDao.getTracksForPlaylist(it.id) })
+                .filter { it.isPlayableInAuto() }
+        }
+
+        /** Tracks behind a SHUFFLE_PLAY_ id — the merged likes or one playlist; null for a foreign id. */
+        private suspend fun shuffleSourceTracks(mediaId: String): List<TrackEntity>? {
+            val key = mediaId.removePrefix(SHUFFLE_PLAY_PREFIX)
+            if (key == LIKED_ID) return likedTracksForAuto()
+            val playlistId = key.toLongOrNull() ?: return null
+            // isPlayableInAuto, NOT the bare is_streamable flag:
+            // never-checked synced rows must play (see AutoBrowse.kt).
+            return playlistDao.getTracksForPlaylist(playlistId).filter { it.isPlayableInAuto() }
+        }
+
+        private fun shuffleItem(mediaId: String): MediaItem = MediaItem.Builder()
+            .setMediaId(mediaId)
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(getString(R.string.shuffle_play))
+                    .setArtworkUri("android.resource://$packageName/drawable/ic_shuffle".toUri())
+                    .setIsBrowsable(false)
+                    .setIsPlayable(true)
+                    .build(),
+            )
+            .build()
+
+        @OptIn(UnstableApi::class)
+        override fun onAddMediaItems(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            mediaItems: List<MediaItem>,
+        ): ListenableFuture<List<MediaItem>> {
+            return serviceScope.future {
+                if (mediaItems.size == 1 && mediaItems[0].mediaId.startsWith(SHUFFLE_PLAY_PREFIX)) {
+                    shuffleSourceTracks(mediaItems[0].mediaId)?.let { tracks ->
+                        return@future tracks.map { it.toAutoMediaItem() }.shuffled()
+                    }
+                }
+                mediaItems.map { item ->
+                    // A browse-child id in an ADD context (e.g. "add to queue")
+                    // means just that one track — strip the parent envelope and
+                    // resolve it as a normal library item. Queue expansion only
+                    // happens on a SET (onSetMediaItems above).
+                    val parsed = AutoBrowseQueue.parse(item.mediaId)
+                    val normalized = if (parsed != null) {
+                        item.buildUpon().setMediaId(parsed.trackId.toString()).build()
+                    } else {
+                        item
+                    }
+                    resolveMediaItem(normalized)
+                }
+            }
+        }
+
+        @OptIn(UnstableApi::class)
+        override fun onGetItem(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            mediaId: String,
+        ): ListenableFuture<LibraryResult<MediaItem>> {
+            android.util.Log.d("LumaPlayback", "onGetItem: id=$mediaId client=${browser.packageName}")
+            return when (mediaId) {
+                ROOT_ID -> {
+                    val rootItem = MediaItem.Builder()
+                        .setMediaId(ROOT_ID)
+                        .setMediaMetadata(
+                            MediaMetadata.Builder()
+                                .setTitle("LUMA")
+                                .setIsBrowsable(true)
+                                .setIsPlayable(false)
+                                .build(),
+                        )
+                        .build()
+                    Futures.immediateFuture(LibraryResult.ofItem(rootItem, null))
+                }
+                PLAYLISTS_ID -> {
+                    val playlistsItem = MediaItem.Builder()
+                        .setMediaId(PLAYLISTS_ID)
+                        .setMediaMetadata(
+                            MediaMetadata.Builder()
+                                .setTitle("Playlists")
+                                .setIsBrowsable(true)
+                                .setIsPlayable(false)
+                                .build(),
+                        )
+                        .build()
+                    Futures.immediateFuture(LibraryResult.ofItem(playlistsItem, null))
+                }
+                else -> {
+                    // Try to resolve track or playlist
+                    serviceScope.future {
+                        // Browse-child ids (AUTOQ_…) resolve to their track,
+                        // keeping the parent-carrying mediaId intact so a
+                        // subsequent tap still expands the playlist (#154/#173).
+                        val trackId = AutoBrowseQueue.parse(mediaId)?.trackId
+                            ?: mediaId.toLongOrNull()
+                        if (trackId != null) {
+                            val track = trackDao.getById(trackId)
+                            if (track != null) {
+                                return@future LibraryResult.ofItem(
+                                    track.toAutoMediaItem(
+                                        mediaId = if (mediaId.startsWith(AutoBrowseQueue.PREFIX)) {
+                                            mediaId
+                                        } else {
+                                            track.id.toString()
+                                        },
+                                    ),
+                                    null,
+                                )
+                            }
+                        }
+                        if (mediaId.startsWith(PLAYLIST_PREFIX)) {
+                            val playlistId = mediaId.removePrefix(PLAYLIST_PREFIX).toLongOrNull()
+                            if (playlistId != null) {
+                                val playlist = playlistDao.getById(playlistId)
+                                if (playlist != null) {
+                                    return@future LibraryResult.ofItem(
+                                        MediaItem.Builder()
+                                            .setMediaId(mediaId)
+                                            .setMediaMetadata(
+                                                MediaMetadata.Builder()
+                                                    .setTitle(playlist.name)
+                                                    .setIsBrowsable(true)
+                                                    .setIsPlayable(false)
+                                                    .build(),
+                                            )
+                                            .build(),
+                                        null,
+                                    )
+                                }
+                            }
+                        }
+                        if (mediaId.startsWith(SHUFFLE_PLAY_PREFIX)) {
+                            val playlistId = mediaId.removePrefix(SHUFFLE_PLAY_PREFIX).toLongOrNull()
+                            if (playlistId != null) {
+                                val playlist = playlistDao.getById(playlistId)
+                                if (playlist != null) {
+                                    return@future LibraryResult.ofItem(
+                                        MediaItem.Builder()
+                                            .setMediaId(mediaId)
+                                            .setMediaMetadata(
+                                                MediaMetadata.Builder()
+                                                    .setTitle(getString(R.string.shuffle_play))
+                                                    .setArtworkUri("android.resource://$packageName/drawable/ic_shuffle".toUri())
+                                                    .setIsBrowsable(false)
+                                                    .setIsPlayable(true)
+                                                    .build(),
+                                            )
+                                            .build(),
+                                        null,
+                                    )
+                                }
+                            }
+                        }
+                        LibraryResult.ofError(SessionError.ERROR_BAD_VALUE)
+                    }
+                }
+            }
+        }
+
+        override fun onGetLibraryRoot(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            params: LibraryParams?,
+        ): ListenableFuture<LibraryResult<MediaItem>> {
+            val rootItem = MediaItem.Builder()
+                .setMediaId(ROOT_ID)
+                .setMediaMetadata(
+                    MediaMetadata.Builder()
+                        .setTitle("LUMA")
+                        .setIsBrowsable(true)
+                        .setIsPlayable(false)
+                        .build(),
+                )
+                .build()
+            return Futures.immediateFuture(LibraryResult.ofItem(rootItem, params))
+        }
+
+        @OptIn(UnstableApi::class)
+        override fun onGetChildren(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            parentId: String,
+            page: Int,
+            pageSize: Int,
+            params: LibraryParams?,
+        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+            return serviceScope.future {
+                val items = when (parentId) {
+                    ROOT_ID -> {
+                        listOf(
+                            MediaItem.Builder()
+                                .setMediaId(PLAYLISTS_ID)
+                                .setMediaMetadata(
+                                    MediaMetadata.Builder()
+                                        .setTitle("Playlists")
+                                        .setIsBrowsable(true)
+                                        .setIsPlayable(false)
+                                        .build(),
+                                )
+                                .build(),
+                            MediaItem.Builder()
+                                .setMediaId(RECENTLY_ADDED_ID)
+                                .setMediaMetadata(
+                                    MediaMetadata.Builder()
+                                        .setTitle("Recently Added")
+                                        .setIsBrowsable(true)
+                                        .setIsPlayable(false)
+                                        .build(),
+                                )
+                                .build(),
+                        )
+                    }
+                    PLAYLISTS_ID -> {
+                        // Android Auto browse shows downloaded playlists only.
+                        // Streaming-only tracks would fail on flaky cellular while
+                        // driving — worse UX than not seeing them at all. Revisit
+                        // when streaming-aware Auto support lands.
+                        val visible = playlistDao.getAllVisible(includeStreamable = false).first()
+                            // getAllVisible always shows the user's own playlists (Library); here one
+                            // with downloads off still needs a downloaded track, as before.
+                            .filter { p ->
+                                !p.sourceId.startsWith("custom_") || p.syncEnabled ||
+                                    playlistDao.getTracksForPlaylist(p.id).any { it.isDownloaded }
+                            }
+                        // ONE "Liked Songs" row for every like source (likedTracksForAuto).
+                        val likedCount = if (visible.any { it.isLikedPlaylist() }) likedTracksForAuto().size else 0
+                        val likedItem = if (likedCount == 0) null else MediaItem.Builder()
+                            .setMediaId(LIKED_ID)
+                            .setMediaMetadata(
+                                MediaMetadata.Builder()
+                                    .setTitle("Liked Songs")
+                                    .setSubtitle(pluralize(likedCount, "track"))
+                                    .setArtworkUri(visible.firstNotNullOfOrNull { p -> p.artUrl.takeIf { p.isLikedPlaylist() } }?.toUri())
+                                    .setIsBrowsable(true)
+                                    .setIsPlayable(false)
+                                    .build(),
+                            )
+                            .build()
+                        listOfNotNull(likedItem) + visible.filterNot { it.isLikedPlaylist() }.map { playlist ->
+                            MediaItem.Builder()
+                                .setMediaId("$PLAYLIST_PREFIX${playlist.id}")
+                                .setMediaMetadata(
+                                    MediaMetadata.Builder()
+                                        .setTitle(playlist.name)
+                                        .setSubtitle(pluralize(playlist.trackCount, "track"))
+                                        .setArtworkUri(playlist.artUrl?.toUri())
+                                        .setIsBrowsable(true)
+                                        .setIsPlayable(false)
+                                        .build(),
+                                )
+                                .build()
+                        }
+                    }
+                    LIKED_ID -> {
+                        listOf(shuffleItem(SHUFFLE_PLAY_PREFIX + LIKED_ID)) + likedTracksForAuto().map { track ->
+                            track.toAutoMediaItem(
+                                mediaId = AutoBrowseQueue.childMediaId(parentId, track.id),
+                            )
+                        }
+                    }
+                    RECENTLY_ADDED_ID -> {
+                        trackDao.getRecentlyAdded(20).first().map { track ->
+                            track.toAutoMediaItem(
+                                mediaId = AutoBrowseQueue.childMediaId(parentId, track.id),
+                            )
+                        }
+                    }
+                    else -> {
+                        if (parentId.startsWith(PLAYLIST_PREFIX)) {
+                            val playlistId = parentId.removePrefix(PLAYLIST_PREFIX).toLongOrNull()
+                            if (playlistId != null) {
+                                val shuffleItem = shuffleItem("$SHUFFLE_PLAY_PREFIX$playlistId")
+
+                                // isPlayableInAuto, NOT the bare is_streamable flag —
+                                // synced rows are "never checked" (is_streamable=0,
+                                // checked_at=null) and the bare flag dropped ALL of
+                                // them: the "playlist opens empty in the car" bug.
+                                // mediaId carries the parent playlist (AUTOQ_…) so a tap
+                                // can queue the WHOLE playlist, not a single item — #154/#173.
+                                val tracks = playlistDao.getTracksForPlaylist(playlistId)
+                                    .filter { it.isPlayableInAuto() }
+                                    .map { track ->
+                                        track.toAutoMediaItem(
+                                            mediaId = AutoBrowseQueue.childMediaId(parentId, track.id),
+                                        )
+                                    }
+                                listOf(shuffleItem) + tracks
+                            } else emptyList()
+                        } else emptyList()
+                    }
+                }
+                LibraryResult.ofItemList(ImmutableList.copyOf(items), params)
+            }
+        }
+
+        override fun onSearch(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            query: String,
+            params: LibraryParams?,
+        ): ListenableFuture<LibraryResult<Void>> {
+            session.notifySearchResultChanged(browser, query, 0, params)
+            return Futures.immediateFuture(LibraryResult.ofVoid())
+        }
+
+        @OptIn(UnstableApi::class)
+        override fun onGetSearchResult(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            query: String,
+            page: Int,
+            pageSize: Int,
+            params: LibraryParams?,
+        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+            return serviceScope.future {
+                // Sanitize for FTS (append * to each term for prefix matching)
+                val sanitized = query.split(" ")
+                    .filter { it.isNotBlank() }
+                    .joinToString(" ") { "$it*" }
+
+                val tracks = trackDao.searchDownloaded(sanitized).first()
+                val items = tracks.map { it.toAutoMediaItem() }
+                LibraryResult.ofItemList(ImmutableList.copyOf(items), params)
+            }
+        }
+
+        @OptIn(UnstableApi::class)
+        override fun onConnect(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+        ): MediaSession.ConnectionResult {
+            val customCommands = listOf(
+                SessionCommand(COMMAND_TOGGLE_SHUFFLE, /* extras = */ android.os.Bundle.EMPTY),
+                SessionCommand(COMMAND_CYCLE_REPEAT, /* extras = */ android.os.Bundle.EMPTY),
+                SessionCommand(COMMAND_TOGGLE_LIKE, /* extras = */ android.os.Bundle.EMPTY),
+                SessionCommand(COMMAND_STOP_SLEEP_TIMER, /* extras = */ android.os.Bundle.EMPTY),
+                SessionCommand(COMMAND_LEAVE_SESSION, /* extras = */ android.os.Bundle.EMPTY),
+            )
+            // FULL library command set — not DEFAULT_SESSION_COMMANDS plus a
+            // hand-picked subset. The old hand-picked list omitted
+            // COMMAND_CODE_LIBRARY_GET_SEARCH_RESULT (Android Auto could
+            // *start* a search but was denied fetching the results — car
+            // search showed nothing) and COMMAND_CODE_LIBRARY_UNSUBSCRIBE.
+            val sessionCommands =
+                MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
+            customCommands.forEach { sessionCommands.add(it) }
+
+            // Default availablePlayerCommands omits COMMAND_CHANGE_MEDIA_ITEMS,
+            // which is what addMediaItem / removeMediaItem / moveMediaItem
+            // require. Without explicitly granting full player commands here,
+            // controller.addMediaItem(...) silently no-ops — the item never
+            // reaches the underlying ExoPlayer's timeline. This is what made
+            // "Play Next" and "Add to Queue" appear broken when a queue
+            // already existed.
+            //
+            // NOTE: third-party controllers DO connect to this session —
+            // Android Auto (com.google.android.projection.gearhead) and
+            // Bluetooth/media-button dispatch are exactly that. Full player
+            // commands remain appropriate: everything they can invoke is a
+            // standard transport/queue op the app also exposes.
+            val playerCommands = Player.Commands.Builder().addAllCommands().build()
+
+            return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                .setAvailableSessionCommands(sessionCommands.build())
+                .setAvailablePlayerCommands(playerCommands)
+                .build()
+        }
+
+        override fun onCustomCommand(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            customCommand: SessionCommand,
+            args: android.os.Bundle,
+        ): ListenableFuture<SessionResult> {
+            when (customCommand.customAction) {
+                COMMAND_STOP_SLEEP_TIMER -> {
+                    sleepTimerController.cancel()
+                }
+                COMMAND_LEAVE_SESSION -> listenTogetherController.send(
+                    com.luma.core.media.listen.ListenTogetherController.Command.Leave,
+                )
+                COMMAND_TOGGLE_SHUFFLE -> {
+                    val player = session.player
+                    player.shuffleModeEnabled = !player.shuffleModeEnabled
+                }
+                COMMAND_CYCLE_REPEAT -> {
+                    val player = session.player
+                    player.repeatMode = when (player.repeatMode) {
+                        Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
+                        Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
+                        else -> Player.REPEAT_MODE_OFF
+                    }
+                }
+                COMMAND_TOGGLE_LIKE -> {
+                    val mediaItem = session.player.currentMediaItem
+                    val mediaMetadata = mediaItem?.mediaMetadata
+                    val candidateId = mediaItem?.mediaId?.toLongOrNull()
+                    val youtubeId = mediaMetadata?.extras?.getString(EXTRA_TRACK_YOUTUBE_ID)
+
+                    if (candidateId != null && mediaMetadata != null) {
+                        // Optimistic update: toggle the local state and push the layout
+                        // immediately so the UI feels snappy and avoids race conditions
+                        // where multiple clicks see the same stale DB state.
+                        val newLikeState = !lastIsLiked
+                        lastIsLiked = newLikeState
+                        pushLayout(session, session.player, newLikeState)
+
+                        serviceScope.launch {
+                            runCatching {
+                                // Resolve the real Room PK. The mediaId may be a
+                                // v0.9.30 streaming-engine synthetic id
+                                // (`videoId.hashCode().toLong()`); without this
+                                // resolve the next call FK-violates on
+                                // `tracks.id` and crashes the service process
+                                // (issue #105).
+                                val realId = resolveTrackIdForLike(
+                                    candidateId = candidateId,
+                                    youtubeId = youtubeId,
+                                    metadata = mediaMetadata,
+                                )
+
+                                // v0.9.52: route through LikeCoordinator — local
+                                // LUMA like stays synchronous; optional Spotify/YT
+                                // mirroring (off by default) layers on top.
+                                likeCoordinator.setLiked(realId, liked = newLikeState)
+                            }.onFailure { e ->
+                                android.util.Log.w(
+                                    "LumaPlayback",
+                                    "notification like toggle failed for candidateId=$candidateId yt=$youtubeId",
+                                    e,
+                                )
+                                // Roll back the optimistic flip so the UI reflects truth.
+                                lastIsLiked = !newLikeState
+                                pushLayout(session, session.player, !newLikeState)
+                            }
+                        }
+                    }
+                }
+            }
+            return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+        }
+
+        /**
+         * Builds a resumable [MediaItem] from a DB row. When [streamUrl] is
+         * non-null (the current track was resolved via [ResumeStreamResolver]
+         * for online-mode resume), it is used as the playback URI directly.
+         * Everything else goes through [toAutoMediaItem]: downloaded rows get
+         * their `file://` URI, and stream rows get a `LUMA-resolve://`
+         * placeholder resolved just-in-time at play — instead of the old
+         * URI-less item that surfaced as an onPlayerError skip.
+         */
+        private fun buildResumeItem(track: TrackEntity, streamUrl: String? = null): MediaItem {
+            val item = track.toAutoMediaItem()
+            return if (streamUrl != null && !(track.isDownloaded && !track.filePath.isNullOrBlank())) {
+                item.buildUpon().setUri(streamUrl.toUri()).build()
+            } else {
+                item
+            }
+        }
+
+        @OptIn(UnstableApi::class)
+        override fun onPlaybackResumption(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            isForPlayback: Boolean,
+        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+            return serviceScope.future {
+                // This callback can run for a genuine play request started via
+                // startForegroundService (media button on a dead process). The
+                // current track may need a (possibly slow) stream-URL resolve
+                // for online mode, which can blow the OS 5s "must call
+                // startForeground" window. Post a lightweight "Resuming…"
+                // foreground notification first to satisfy it; Media3 replaces
+                // it with the real media notification once playback starts.
+                // Only for a real play request — never for boot-time
+                // notification population (isForPlayback = false).
+                if (isForPlayback) showResumingForegroundNotification()
+
+                // Preferred path: restore the full persisted queue at the
+                // saved track + position so next/prev work and playback
+                // continues where it stopped.
+                val plan = playbackResumer.buildResumePlan()
+                if (plan != null) {
+                    // Resolve ONLY the current track's stream URL in the
+                    // foreground so it plays in online mode; other streamed
+                    // tracks resolve later via the prefetch/skip path.
+                    // Downloaded tracks return null here and use their file.
+                    val currentStreamUrl = resumeStreamResolver
+                        .resolveStreamUrl(plan.tracks[plan.startIndex])
+                    val items = plan.tracks.mapIndexed { index, track ->
+                        buildResumeItem(
+                            track,
+                            streamUrl = if (index == plan.startIndex) currentStreamUrl else null,
+                        )
+                    }
+                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                        session.player.shuffleModeEnabled = plan.isShuffled
+                        // Repeat mode is persisted with the queue and must be
+                        // restored on BOTH resume paths — resumeLastQueue (in-app)
+                        // and this media-button/dead-process path. Device-proven
+                        // miss: repeat set to All came back Off through here.
+                        // (plan.source is still dropped on this path — the
+                        // "Playing from" label doesn't survive a service-side
+                        // resume; repo-side wiring for that is a follow-up.)
+                        session.player.repeatMode = plan.repeatMode.toPlayerRepeatMode()
+                    }
+                    // Force play once the queue lands iff this is a real play
+                    // request (not boot-time notification population).
+                    resumePlayGate.arm(isForPlayback)
+                    return@future MediaSession.MediaItemsWithStartPosition(
+                        ImmutableList.copyOf(items),
+                        plan.startIndex,
+                        plan.positionMs,
+                    )
+                }
+
+                // Fallback (no persisted queue yet): single last-played
+                // track, or the most recently added track if none.
+                val track = trackDao.getLastPlayedTrack()
+                    ?: trackDao.getRecentlyAdded(1).first().firstOrNull()
+                val item = track?.let {
+                    buildResumeItem(it, streamUrl = resumeStreamResolver.resolveStreamUrl(it))
+                }
+
+                if (item != null) {
+                    resumePlayGate.arm(isForPlayback)
+                    MediaSession.MediaItemsWithStartPosition(
+                        ImmutableList.of(item),
+                        /* startIndex= */ 0,
+                        /* startPositionMs= */ C.TIME_UNSET,
+                    )
+                } else {
+                    // Nothing to resume (empty library). Drop the "Resuming…"
+                    // placeholder we may have posted so it doesn't linger as a
+                    // stuck foreground notification, then signal no-resume.
+                    if (isForPlayback) {
+                        ServiceCompat.stopForeground(
+                            this@LumaPlaybackService,
+                            ServiceCompat.STOP_FOREGROUND_REMOVE,
+                        )
+                    }
+                    throw UnsupportedOperationException()
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Whether the player is "idle" for the purposes of the service's own
+ * shutdown countdown.
+ *
+ * `playWhenReady` (the user's intent) is the primary signal, NOT `isPlaying`:
+ * a rebuffer flips `isPlaying` false while the user still expects sound, and
+ * arming a shutdown countdown during a stall would be wrong. The two terminal
+ * states are idle regardless of intent — a finished queue (ENDED) and an
+ * errored-out player (IDLE) both leave `playWhenReady` true forever, and were
+ * exactly the "service alive 1h15m after last play" measurement.
+ */
+/**
+ * The MIME type a cast receiver is told to expect. Only a hint — the media
+ * server sniffs the real type from the bytes — but the Default Media Receiver
+ * needs one to pick its player. Codec extra (streams) first, then extension.
+ */
+internal fun castContentType(uri: android.net.Uri, codec: String?): String {
+    val hint = codec?.lowercase() ?: uri.lastPathSegment?.substringAfterLast('.', "")?.lowercase()
+    return when (hint) {
+        "flac" -> "audio/flac"
+        "m4a", "mp4", "aac", "alac" -> "audio/mp4"
+        "opus", "ogg", "oga", "vorbis" -> "audio/ogg"
+        "webm", "weba" -> "audio/webm"
+        "wav" -> "audio/wav"
+        else -> "audio/mpeg"
+    }
+}
+
+internal fun isPlayerIdle(playWhenReady: Boolean, playbackState: Int): Boolean =
+    !playWhenReady ||
+        playbackState == Player.STATE_ENDED ||
+        playbackState == Player.STATE_IDLE
+
+/**
+ * Service-owned idle-shutdown countdown: emits after [timeoutMs] of
+ * uninterrupted idleness, then keeps emitting every [timeoutMs] while the
+ * idleness persists, and goes silent the moment playback resumes.
+ *
+ * The repeat matters: a stop attempt can be a no-op (a bound Android Auto
+ * client keeps the service alive through `stopSelf()`), and a one-shot
+ * emission would never retry after the client unbinds.
+ *
+ * Why the SERVICE owns this: the previous design released the
+ * MediaController from the repository after an idle timeout and was reverted
+ * on device evidence — with no controller the repository goes deaf, so
+ * media-button/Bluetooth playback ran with stale UI state and silently lost
+ * listening history. The service stopping itself needs no controller at all.
+ *
+ * Top-level + `internal` so tests drive it on virtual time without booting
+ * the service (same idea as `positionTicker` in PlayerRepositoryImpl).
+ */
+@kotlinx.coroutines.ExperimentalCoroutinesApi
+internal fun idleStopTicker(
+    idle: kotlinx.coroutines.flow.Flow<Boolean>,
+    timeoutMs: Long,
+): kotlinx.coroutines.flow.Flow<Unit> = idle
+    .distinctUntilChanged()
+    .flatMapLatest { isIdle ->
+        if (isIdle) {
+            kotlinx.coroutines.flow.flow {
+                while (true) {
+                    delay(timeoutMs)
+                    emit(Unit)
+                }
+            }
+        } else {
+            kotlinx.coroutines.flow.emptyFlow()
+        }
+    }
+
+/** The notification's session line: "With Maya +2", the host named first for a listener; "Listening together" alone. */
+internal fun togetherLine(state: com.luma.core.media.listen.ListenTogetherState): String {
+    val room = state as? com.luma.core.media.listen.ListenTogetherState.InRoom ?: return "Listening together"
+    val others = room.members.filter { it.id != room.myId }.sortedBy { if (it.id == room.hostId) 0 else 1 }
+    val first = others.firstOrNull() ?: return "Listening together"
+    return "With ${first.name ?: "Someone"}" + if (others.size > 1) " +${others.size - 1}" else ""
+}

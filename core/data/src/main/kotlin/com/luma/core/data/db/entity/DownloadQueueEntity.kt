@@ -1,0 +1,86 @@
+package com.luma.core.data.db.entity
+
+import androidx.room.ColumnInfo
+import androidx.room.Entity
+import androidx.room.ForeignKey
+import androidx.room.Index
+import androidx.room.PrimaryKey
+import com.luma.core.model.DownloadFailureType
+import com.luma.core.model.DownloadStatus
+import java.time.Instant
+
+/**
+ * Room entity representing a pending or completed download in the queue.
+ */
+@Entity(
+    tableName = "download_queue",
+    foreignKeys = [
+        ForeignKey(
+            entity = TrackEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["track_id"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+        ForeignKey(
+            entity = SyncHistoryEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["sync_id"],
+            onDelete = ForeignKey.SET_NULL,
+        ),
+    ],
+    indices = [
+        Index(value = ["track_id"]),
+        Index(value = ["sync_id"]),
+        Index(value = ["status"]),
+    ],
+)
+data class DownloadQueueEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0,
+
+    @ColumnInfo(name = "track_id")
+    val trackId: Long,
+
+    @ColumnInfo(name = "sync_id")
+    val syncId: Long? = null,
+
+    val status: DownloadStatus = DownloadStatus.PENDING,
+
+    @ColumnInfo(name = "search_query")
+    val searchQuery: String = "",
+
+    @ColumnInfo(name = "youtube_url")
+    val youtubeUrl: String? = null,
+
+    @ColumnInfo(name = "retry_count")
+    val retryCount: Int = 0,
+
+    @ColumnInfo(name = "error_message")
+    val errorMessage: String? = null,
+
+    @ColumnInfo(name = "failure_type")
+    val failureType: DownloadFailureType = DownloadFailureType.NONE,
+
+    @ColumnInfo(name = "rejected_video_id")
+    val rejectedVideoId: String? = null,
+
+    /**
+     * True when the user explicitly asked for this download: a tap on a song
+     * (since v0.9.110), a Retry of a song no kept playlist or followed mix
+     * downloads, a search download left waiting for lossless, Library &
+     * Storage -> "Re-download" (#474, #532). The automatic requeue
+     * only takes tracks inside a sync-enabled, non-mix playlist, on purpose
+     * (#368). A track the user pointed at has no such requirement, so the pickup
+     * queries let this flag stand in for that membership. Outside a sync it is
+     * one of the ways a row counts as asked for (DownloadQueueDao's ASKED_FOR),
+     * the only rows a background download takes.
+     */
+    @ColumnInfo(name = "user_requested", defaultValue = "0")
+    val userRequested: Boolean = false,
+
+    @ColumnInfo(name = "created_at")
+    val createdAt: Instant = Instant.now(),
+
+    @ColumnInfo(name = "completed_at")
+    val completedAt: Instant? = null,
+)

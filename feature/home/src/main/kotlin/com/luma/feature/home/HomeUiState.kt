@@ -1,0 +1,138 @@
+package com.luma.feature.home
+
+import com.luma.core.data.discovery.Genre
+import com.luma.core.data.discovery.GenreCatalog
+import com.luma.data.ytmusic.model.AlbumSummary
+import com.luma.data.ytmusic.model.PlaylistSummary
+import com.luma.feature.home.banner.MetadataBackfillBannerState
+
+/**
+ * UI state for the redesigned Home screen — a pure *discovery* surface.
+ *
+ * Library content (LUMA/daily mixes, liked songs, recently-added, custom
+ * playlists) used to live here too; it has been relocated to the Library
+ * screen. Home now carries only the Discover hero plus the persistent
+ * "chrome" (tip jar pill, lossless prompt, metadata-backfill banner).
+ *
+ * Note: sync-status, per-source connection booleans, and `hasEverSynced`
+ * used to live here too — they powered the SyncStatusCard at the top of
+ * the Home screen. The card was relocated to the Sync tab; its data
+ * plumbing moved with it to `:feature:sync`'s SyncViewModel/SyncUiState.
+ */
+data class HomeUiState(
+    /** The Discover hero. Null until the Daily Discover playlist materializes. */
+    val hero: DiscoverHeroState? = null,
+
+    val isLoading: Boolean = true,
+    /**
+     * Non-null when the user has not enabled lossless AND has not
+     * dismissed the Home banner. Drives the "Try lossless audio"
+     * banner. A singleton sentinel — its mere presence signals "show the banner".
+     */
+    val losslessPrompt: LosslessPromptState? = null,
+
+    /**
+     * True when Home should say there's no lossless right now: lossless is
+     * ON, the shared path has missed enough consecutive resolves to look
+     * dead, the user owns no lossless source of their own to fall back to,
+     * and they haven't dismissed the notice. Tap opens Settings › Audio.
+     */
+    val showLosslessOffline: Boolean = false,
+
+    /**
+     * v0.9.13: live tip-jar state. Drives the Home pill (compact
+     * `$X/$Y` indicator) and the Tip Jar bottom sheet. Sourced from
+     * [com.luma.core.data.tipjar.TipJarRepository] which fetches
+     * the public supporters JSON. Defaults to [com.luma.core.data.tipjar.TipJarState.EMPTY]
+     * before the repo's first emission so the Home pill never crashes
+     * on null.
+     */
+    val tipJar: com.luma.core.data.tipjar.TipJarState =
+        com.luma.core.data.tipjar.TipJarState.EMPTY,
+
+    /**
+     * v0.9.35: state of the "re-tagging library" banner. Hidden in
+     * the steady state — only renders while [com.luma.data.download.backfill.MetadataBackfillWorker]
+     * is actively processing rows, and for a 2-second "Done" pulse
+     * after completion.
+     */
+    val metadataBackfillBanner: MetadataBackfillBannerState =
+        MetadataBackfillBannerState.Hidden,
+
+    // ── Qobuz discovery rows (genre-filterable) ────────────────────────
+    /** Genre chips; the first ("All") is the no-filter default. */
+    val genres: List<Genre> = GenreCatalog.GENRES,
+    /** Currently-selected chip label; drives the three rows below. */
+    val selectedGenre: String = "All",
+    /** False when the user opted out of Qobuz discovery on Home — hides the
+     * genre chips (the rows hide themselves via their empty lists). */
+    val qobuzDiscoveryEnabled: Boolean = true,
+    /** User-arranged visible Home sections, in render order
+     * (Settings > Appearance > Home layout). */
+    val sections: List<com.luma.core.data.prefs.HomeSection> =
+        com.luma.core.data.prefs.DEFAULT_HOME_SECTIONS,
+    val newReleases: List<AlbumSummary> = emptyList(),
+    val topAlbums: List<AlbumSummary> = emptyList(),
+    val playlists: List<PlaylistSummary> = emptyList(),
+
+    // ── Home mix rails (derived from playlists + recipes) ──────────────
+    val madeForYou: List<HomeMix> = emptyList(),
+    val radios: List<HomeMix> = emptyList(),
+    val moodDecades: List<HomeMix> = emptyList(),
+    val yourMixes: List<HomeMix> = emptyList(),
+    val customMixPlaylistIds: Set<Long> = emptySet(),
+
+    // ── "Your playlists" rail (user-pinned + optional Liked card) ──────
+    /** Pinned playlists in pin order (pinnedToHomeAt ascending). */
+    val yourPlaylists: List<HomeMix> = emptyList(),
+    /** Merged Liked Songs card; null while the Settings toggle is off. */
+    val likedCard: LikedCardState? = null,
+) {
+    /** True before the Discover hero has materialized — drives the cold-start placeholder. */
+    val isColdStart: Boolean get() = hero == null
+
+    /**
+     * The "Personalize your Home" card belongs to a Home with nothing on it — a
+     * brand-new or thin-library user. It used to key off the hero alone, so a
+     * user whose Daily Discover had not built yet (it seeds from listening) saw
+     * "Connect a service and run a sync" sitting above forty synced mixes and
+     * their own playlists. If any rail has content, the rails lead and the
+     * empty hero slot simply collapses.
+     */
+    val showColdStartCard: Boolean
+        get() = hero == null && yourMixes.isEmpty() && madeForYou.isEmpty() &&
+            radios.isEmpty() && moodDecades.isEmpty() && yourPlaylists.isEmpty() &&
+            likedCard == null
+}
+
+/** A mix as a Home rail card. buildState only meaningful for LUMA_MIX. */
+data class HomeMix(
+    val id: Long, val title: String, val artUrl: String?,
+    val source: com.luma.core.model.MusicSource,
+    val buildState: com.luma.core.data.mix.MixBuildState = com.luma.core.data.mix.MixBuildState.READY,
+    /** Hero-pager subtitle ("N tracks") for the Your-mix pages. */
+    val trackCount: Int = 0,
+    /** Set when the user showed this mix on Home from the manage screen; pinned mixes lead their rail. */
+    val pinnedToHomeAt: Long? = null,
+)
+
+/** Merged Liked Songs card on the "Your playlists" rail (null = toggle off). */
+data class LikedCardState(val trackCount: Int)
+
+/**
+ * Sentinel for the "Try lossless audio" Home banner. Singleton
+ * (data object) because the banner copy is static — its mere
+ * presence in the UI state signals "show the banner."
+ */
+data object LosslessPromptState
+
+/**
+ * Sort options for the Home Playlists grid. Deliberately duplicated from
+ * the Library module's `SortOrder` to avoid a cross-module dependency for
+ * three enum values. If a third surface ever needs the same options, lift
+ * to a shared module rather than crossing the feature:library boundary.
+ *
+ * ponytail: retained — HomeViewModel/HomeScreen still reference it; they're
+ * rewritten in the later Home-redesign tasks, which will remove this.
+ */
+enum class PlaylistSortOrder { RECENT, ALPHABETICAL, MOST_PLAYED }

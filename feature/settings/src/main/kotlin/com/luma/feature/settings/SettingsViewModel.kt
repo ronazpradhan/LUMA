@@ -1,0 +1,1855 @@
+package com.luma.feature.settings
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.luma.core.auth.TokenManager
+import com.luma.core.auth.model.AuthService
+import com.luma.core.auth.model.AuthState
+import com.luma.core.auth.youtube.YouTubeCookieHelper
+import android.content.Context
+import android.net.Uri
+import com.luma.core.data.db.dao.TrackDao
+import com.luma.core.data.diagnostics.CrashFileStore
+import com.luma.core.data.prefs.DownloadNetworkPreference
+import com.luma.core.data.prefs.LikePreferences
+import com.luma.core.data.social.Destination
+import com.luma.core.data.prefs.QualityPreference
+import com.luma.core.data.prefs.StartTab
+import com.luma.core.data.prefs.StoragePreference
+import com.luma.core.data.prefs.ThemePreference
+import com.luma.core.data.prefs.YouTubeHistoryPreference
+import com.luma.core.data.youtube.YouTubeHistoryScrobbler
+import com.luma.core.data.youtube.YouTubeScrobblerHealth
+import com.luma.core.data.youtube.YouTubeScrobblerState
+import com.luma.core.data.sync.workers.LumaDiscoveryWorker
+import com.luma.core.data.sync.workers.TagEnrichmentWorker
+import com.luma.core.model.DownloadNetworkMode
+import dagger.hilt.android.qualifiers.ApplicationContext
+import com.luma.core.data.lastfm.LastFmApiClient
+import com.luma.core.data.lastfm.LastFmCredentials
+import com.luma.core.data.lastfm.LastFmScrobbler
+import com.luma.core.data.lastfm.LastFmSession
+import com.luma.core.data.lastfm.LastFmSessionPreference
+import com.luma.core.data.db.BackupImportResult
+import com.luma.core.data.db.BackupImportScope
+import com.luma.core.data.db.DatabaseBackupManager
+import com.luma.core.data.db.dao.ListeningEventDao
+import com.luma.data.download.files.LibrarySizeBreakdown
+import com.luma.data.download.files.LibrarySizeHolder
+import com.luma.data.download.files.MoveLibraryCoordinator
+import com.luma.data.download.files.MoveLibraryState
+import com.luma.data.download.files.ReorganizeLibraryCoordinator
+import com.luma.data.download.files.ReorganizeLibraryState
+import com.luma.data.download.lossless.AggregatorRateLimiter
+import com.luma.data.download.lossless.LosslessAvailability
+import com.luma.data.download.lossless.LosslessQualityTier
+import com.luma.data.download.lossless.LosslessSourcePreferences
+import com.luma.data.download.lossless.RoutingRow
+import com.luma.data.download.lossless.qbdlx.QbdlxCredentialStore
+import com.luma.data.download.lossless.qbdlx.QobuzAccountConnector
+import com.luma.data.download.lossless.qbdlx.QobuzLoginResult
+import com.luma.data.download.lossless.qobuz.QobuzSource
+import com.luma.data.download.lossless.relay.LosslessRelayClient
+import com.luma.data.download.prefs.StreamingQualityPreferences
+import com.luma.feature.settings.components.squidCaptchaStatus
+import com.luma.core.data.repository.MusicRepository
+import com.luma.core.model.QualityTier
+import com.luma.core.model.ThemeMode
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import javax.inject.Inject
+
+/**
+ * ViewModel for the Settings screen.
+ *
+ * Orchestrates Spotify sp_dc cookie auth, YouTube Music cookie auth, quality selection,
+ * and library storage stats. Both Spotify and YouTube use a cookie-paste flow where
+ * the user copies cookies from their browser.
+ *
+ * Audio quality changes are persisted to DataStore via [QualityPreference] so they
+ * survive app restarts and are picked up by the download pipeline.
+ *
+ * Equalizer state is managed by [EqualizerViewModel] on the dedicated EQ screen;
+ * this ViewModel no longer owns any EQ methods.
+ */
+@HiltViewModel
+class SettingsViewModel @Inject constructor(
+    @ApplicationContext private val appContext: Context,
+    private val tokenManager: TokenManager,
+    private val musicRepository: MusicRepository,
+    private val librarySizeHolder: LibrarySizeHolder,
+    private val qualityPreference: QualityPreference,
+    private val themePreference: ThemePreference,
+    private val sleepTimerController: com.luma.core.media.SleepTimerController,
+    private val storagePreference: StoragePreference,
+    private val downloadNetworkPreference: DownloadNetworkPreference,
+    private val moveLibraryCoordinator: MoveLibraryCoordinator,
+    private val reorganizeLibraryCoordinator: ReorganizeLibraryCoordinator,
+    private val youTubeCookieHelper: YouTubeCookieHelper,
+    private val discordRpcCoordinator: com.luma.core.data.discord.DiscordRpcCoordinator,
+    private val lastFmApiClient: LastFmApiClient,
+    private val lastFmSessionPreference: LastFmSessionPreference,
+    private val lastFmCredentials: LastFmCredentials,
+    private val listeningEventDao: ListeningEventDao,
+    private val lastFmScrobbler: LastFmScrobbler,
+    private val youTubeHistoryPreference: YouTubeHistoryPreference,
+    private val lumaMixPreference: com.luma.core.data.prefs.LumaMixPreference,
+    private val homeDiscoveryPreference: com.luma.core.data.prefs.HomeDiscoveryPreference,
+    private val nowPlayingPreference: com.luma.core.data.prefs.NowPlayingPreference,
+    private val homeSectionsPreference: com.luma.core.data.prefs.HomeSectionsPreference,
+    private val youTubeHistoryScrobbler: YouTubeHistoryScrobbler,
+    private val youTubeScrobblerState: YouTubeScrobblerState,
+    private val losslessPrefs: LosslessSourcePreferences,
+    private val streamingQualityPrefs: StreamingQualityPreferences,
+    private val losslessRateLimiter: AggregatorRateLimiter,
+    private val qobuzSource: QobuzSource,
+    private val qbdlxCredentialStore: QbdlxCredentialStore,
+    private val losslessAvailability: LosslessAvailability,
+    private val qobuzAccountConnector: QobuzAccountConnector,
+    private val likePreferences: LikePreferences,
+    private val trackDao: TrackDao,
+    private val settingsDeepLinkController: com.luma.core.data.navigation.SettingsDeepLinkController,
+    private val crashFileStore: CrashFileStore,
+    private val streamingPreference: com.luma.core.data.prefs.StreamingPreference,
+    private val crossfadePreference: com.luma.core.data.prefs.CrossfadePreference,
+    private val autoplayRadioPreference: com.luma.core.data.prefs.AutoplayRadioPreference,
+    private val databaseBackupManager: DatabaseBackupManager,
+    private val listenBrainzPreference: com.luma.core.data.listenbrainz.ListenBrainzPreference,
+    private val listenBrainzApiClient: com.luma.core.data.listenbrainz.ListenBrainzApiClient,
+    private val listenSinkCoordinator: com.luma.core.data.listen.ListenSinkCoordinator,
+    private val listenSubmissionDao: com.luma.core.data.db.dao.ListenSubmissionDao,
+    private val relayClient: LosslessRelayClient,
+    /**
+     * Issue #255 — Last.fm-as-a-source lifecycle. Connect/disconnect
+     * reconcile the "Recommended by Last.fm" recipe so the Sync-tab
+     * source card appears (or disappears) immediately, not next launch.
+     */
+    private val lastFmRecommendationSource: com.luma.core.data.mix.LastFmRecommendationSource,
+) : ViewModel() {
+
+    // ── ListenBrainz ────────────────────────────────────────────────────────
+    //
+    // Exposed as standalone StateFlows rather than threaded through the big
+    // combine(...) below. That combine no longer uses numeric indices (see
+    // [Values]), but it is still dozens of sources feeding one monolithic UiState, and
+    // ListenBrainz belongs to one screen — keeping it separate is the right shape
+    // regardless.
+
+    private val _listenBrainzTokenInput = MutableStateFlow("")
+    val listenBrainzTokenInput: StateFlow<String> = _listenBrainzTokenInput
+
+    /** Transient states the persisted prefs cannot express (validating / failed). */
+    private val _listenBrainzTransient =
+        MutableStateFlow<com.luma.feature.settings.components.ListenBrainzState?>(null)
+
+    private val _isListenBrainzDraining = MutableStateFlow(false)
+    val isListenBrainzDraining: StateFlow<Boolean> = _isListenBrainzDraining
+
+    /**
+     * Outstanding listens for ListenBrainz. Depends on the connect cutoff, so it
+     * has to be resolved per emission — see ListenSubmissionDao.pendingCountFor.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val listenBrainzPending: kotlinx.coroutines.flow.Flow<Int> =
+        listenBrainzPreference.connectedAtMs.flatMapLatest { since ->
+            if (since == null) {
+                kotlinx.coroutines.flow.flowOf(0)
+            } else {
+                listenSubmissionDao.pendingCountFor(
+                    com.luma.core.data.listenbrainz.ListenBrainzSink.TARGET_ID,
+                    sinceMs = since,
+                )
+            }
+        }
+
+    val listenBrainzState: StateFlow<com.luma.feature.settings.components.ListenBrainzState> =
+        combine(
+            listenBrainzPreference.token,
+            listenBrainzPreference.nowPlayingEnabled,
+            listenBrainzPending,
+            _listenBrainzTransient,
+        ) { token, nowPlaying, pending, transient ->
+            when {
+                // A transient state only survives while disconnected; once a token
+                // is stored the real state wins so a stale error cannot mask a
+                // working connection.
+                token == null && transient != null -> transient
+                token == null -> com.luma.feature.settings.components.ListenBrainzState.Disconnected
+                else -> com.luma.feature.settings.components.ListenBrainzState.Connected(
+                    pendingListens = pending,
+                    nowPlayingEnabled = nowPlaying,
+                )
+            }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = com.luma.feature.settings.components.ListenBrainzState.Disconnected,
+        )
+
+    val mirrorLikesLastFm: StateFlow<Boolean> =
+        likePreferences.mirrorLikesLastFm.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /**
+     * Issue #112 — submit only the primary artist to Last.fm. Exposed as its
+     * own flow rather than folded into the main `combine`, which is index-based
+     * (`values[N]`) and would need every downstream index shifted.
+     */
+    val scrobbleFirstArtistOnly: StateFlow<Boolean> =
+        lastFmSessionPreference.firstArtistOnly.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    fun onScrobbleFirstArtistOnlyChanged(enabled: Boolean) {
+        viewModelScope.launch { lastFmSessionPreference.setFirstArtistOnly(enabled) }
+    }
+
+    fun onListenBrainzTokenChange(value: String) {
+        _listenBrainzTokenInput.value = value
+        // Clear a previous failure as soon as the user edits — leaving the error up
+        // while they retype reads as if the new token already failed.
+        if (_listenBrainzTransient.value is com.luma.feature.settings.components.ListenBrainzState.Error) {
+            _listenBrainzTransient.value = null
+        }
+    }
+
+    /**
+     * Validates before storing, so a mistyped token fails here rather than being
+     * saved and silently never scrobbling.
+     */
+    fun onConnectListenBrainz() {
+        val token = _listenBrainzTokenInput.value.trim()
+        if (token.isBlank()) return
+        _listenBrainzTransient.value = com.luma.feature.settings.components.ListenBrainzState.Validating
+        viewModelScope.launch {
+            val valid = runCatching { listenBrainzApiClient.validateToken(token) }.getOrDefault(false)
+            if (valid) {
+                listenBrainzPreference.connect(token, System.currentTimeMillis())
+                _listenBrainzTokenInput.value = ""
+                _listenBrainzTransient.value = null
+            } else {
+                _listenBrainzTransient.value =
+                    com.luma.feature.settings.components.ListenBrainzState.Error(
+                        "That token didn't work. Copy it again from listenbrainz.org/profile.",
+                    )
+            }
+        }
+    }
+
+    fun onDisconnectListenBrainz() {
+        viewModelScope.launch {
+            listenBrainzPreference.clear()
+            // Drop this destination's submission rows too, so reconnecting later
+            // starts clean instead of inheriting stale attempt counts.
+            runCatching {
+                listenSubmissionDao.clearTarget(
+                    com.luma.core.data.listenbrainz.ListenBrainzSink.TARGET_ID,
+                )
+            }
+            _listenBrainzTransient.value = null
+        }
+    }
+
+    fun onListenBrainzNowPlayingToggle(enabled: Boolean) {
+        viewModelScope.launch { listenBrainzPreference.setNowPlayingEnabled(enabled) }
+    }
+
+    fun onSyncListenBrainzNow() {
+        if (_isListenBrainzDraining.value) return
+        _isListenBrainzDraining.value = true
+        viewModelScope.launch {
+            runCatching { listenSinkCoordinator.drainAll() }
+            _isListenBrainzDraining.value = false
+        }
+    }
+
+    /**
+     * Live streaming-mode flag (Online vs Offline). Mirrors what the
+     * Home top-bar chip reads from the same [streamingPreference] —
+     * Settings is the canonical home for this preference; the chip is
+     * the quick-access surface. Both end up writing through
+     * [MusicRepository.applyStreamingMode].
+     */
+    val streamingEnabled: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        streamingPreference.enabled.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /**
+     * Flip streaming mode from the Settings tab. Routes through the
+     * repository so workers + prefs stay in sync — same path as
+     * [HomeViewModel.onStreamingToggle], minus the first-time
+     * disclosure dialog (a user opening Settings is already deliberate;
+     * we don't need the educational popup here).
+     */
+    fun onStreamingToggle(enabled: Boolean) {
+        if (enabled == streamingEnabled.value) return
+        viewModelScope.launch {
+            musicRepository.applyStreamingMode(enabled = enabled)
+        }
+    }
+
+    /**
+     * Live "stream on cellular" preference. Surfaced as a switch in the
+     * Settings Playback section; PlayerRepositoryImpl.buildMediaItemForTrack
+     * reads it via streamingPreference.streamOnCellular to refuse streams
+     * on metered networks when this is false (the default).
+     */
+    val streamOnCellular: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        streamingPreference.streamOnCellular.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /** Persist the cellular-streaming preference flip. */
+    fun onStreamOnCellularToggle(value: Boolean) {
+        if (value == streamOnCellular.value) return
+        viewModelScope.launch {
+            streamingPreference.setStreamOnCellular(value)
+        }
+    }
+
+    /**
+     * Test-only "Force YouTube fallback" toggle. When on,
+     * [StreamSourceRegistry] skips Kennyy/Squid and streams every track
+     * via YouTube — surfaced as a switch in the Diagnostics card so the
+     * lossless-down fallback path can be reproduced on demand.
+     */
+    val forceYouTubeFallback: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        streamingPreference.forceYouTubeFallback.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /** Persist the force-YouTube-fallback test toggle flip. */
+    fun setForceYouTubeFallback(v: Boolean) = viewModelScope.launch {
+        streamingPreference.setForceYouTubeFallback(v)
+    }
+
+    val forceQbdlxOnly: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        streamingPreference.forceQbdlxOnly.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /** Persist the force-qbdlx-only test toggle flip. */
+    fun setForceQbdlxOnly(v: Boolean) = viewModelScope.launch {
+        streamingPreference.setForceQbdlxOnly(v)
+    }
+
+    /** Crossfade on/off — drives the Playback section toggle. Off by default. */
+    /** Autoplay radio: seed a song radio when the last queued track starts. Off by default. */
+    val autoplayRadioEnabled: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        autoplayRadioPreference.enabled.stateIn(
+            viewModelScope,
+            kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            false,
+        )
+
+    fun onAutoplayRadioToggle(enabled: Boolean) {
+        viewModelScope.launch { autoplayRadioPreference.setEnabled(enabled) }
+    }
+
+    val crossfadeEnabled: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        crossfadePreference.enabled.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /** Crossfade fade duration in ms (clamped 1000–12000); drives the slider. */
+    val crossfadeDurationMs: kotlinx.coroutines.flow.StateFlow<Long> =
+        crossfadePreference.durationMs.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = 6000L,
+        )
+
+    /** Persist the crossfade on/off flip. */
+    fun onCrossfadeToggle(enabled: Boolean) {
+        if (enabled == crossfadeEnabled.value) return
+        viewModelScope.launch { crossfadePreference.setEnabled(enabled) }
+    }
+
+    /** Persist the crossfade duration (clamped on write). */
+    fun onCrossfadeDurationChange(ms: Long) = viewModelScope.launch {
+        crossfadePreference.setDurationMs(ms)
+    }
+
+    /** Internal mutable UI state that is combined with token-manager flows. */
+    private val _localState = MutableStateFlow(LocalState())
+
+    /**
+     * True when NO lossless path is configured (no connected account, no custom
+     * endpoint, no relay) — drives the Settings "connect your account" line.
+     * Derived from [LosslessAvailability] rather than the credential store: the
+     * store now knows only about the user's own connected account, and a custom
+     * endpoint or a relay is a working lossless path without one.
+     *
+     * MUST stay declared above the [init] block: Kotlin initializes properties
+     * top-to-bottom, and anything in `init` that touches this field before its
+     * declaration reads null → NPE opening Settings.
+     */
+    val qbdlxExpired: StateFlow<Boolean> =
+        losslessAvailability.qbdlxEnabled.map { !it }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    /**
+     * The ROUTING block's rows. Built in [LosslessAvailability] — the same
+     * predicates the source and downloads read — so Settings cannot claim a source
+     * the resolver does not have. Configuration only, never liveness (see there).
+     */
+    val losslessRouting: StateFlow<List<RoutingRow>> =
+        losslessAvailability.routingRows
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    // -- Custom lossless endpoint --------------------------------------------
+
+    /** Result of the manual "Test" — reachability only, never health. */
+    enum class EndpointTestState { IDLE, TESTING, REACHABLE, UNREACHABLE }
+
+    private val _customEndpointTest = MutableStateFlow(EndpointTestState.IDLE)
+    val customEndpointTest: StateFlow<EndpointTestState> = _customEndpointTest
+
+    /** "Must be an https:// URL" while the last commit was rejected, else null. */
+    private val _customEndpointError = MutableStateFlow<String?>(null)
+    val customEndpointError: StateFlow<String?> = _customEndpointError
+
+    /**
+     * The user's own relay base, normalised, or null. `QbdlxFileUrlRouter` puts it
+     * ahead of every relay from runtime config, so this field is the whole feature.
+     */
+    val customEndpoint: StateFlow<String?> =
+        losslessPrefs.customLosslessEndpoint
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /**
+     * Commits the field on IME Done / focus loss (the screen never calls this per
+     * keystroke — `https://re` must never be persisted as a base). Blank means
+     * "clear it", which is a valid instruction and not an error; anything else
+     * that [LosslessSourcePreferences.normaliseEndpoint] rejects is.
+     */
+    fun onCustomEndpointCommitted(raw: String) {
+        val trimmed = raw.trim()
+        val normalised = LosslessSourcePreferences.normaliseEndpoint(trimmed)
+        if (trimmed.isNotEmpty() && normalised == null) {
+            _customEndpointError.value = "Must be an https:// URL"
+            return
+        }
+        _customEndpointError.value = null
+        // A commit invalidates the last test result — it described the old base.
+        // This lives here and NOT in an `onEach` on [customEndpoint]: that operator
+        // runs inside the WhileSubscribed(5_000) share, so leaving Settings for more
+        // than five seconds and coming back silently wiped a "Reachable" the user
+        // had just earned, with nothing having changed.
+        _customEndpointTest.value = EndpointTestState.IDLE
+        viewModelScope.launch { losslessPrefs.setCustomLosslessEndpoint(normalised) }
+    }
+
+    /** Typing clears the rejection — it described text that is no longer in the field. */
+    fun onCustomEndpointEdited() { _customEndpointError.value = null }
+
+    /** The in-flight probe, so a second Test cannot be answered by the first. */
+    private var testJob: Job? = null
+
+    /** No endpoint set = nothing to test; the button is disabled for the same reason. */
+    fun onTestCustomEndpoint() {
+        val base = customEndpoint.value ?: return
+        // A probe runs up to 8s and the field stays editable throughout: without
+        // cancelling the previous one AND re-checking what is on screen, a probe of
+        // the OLD base returned and painted a green "Reachable" beside the new one —
+        // a measurement of a URL the user had already replaced.
+        testJob?.cancel()
+        _customEndpointTest.value = EndpointTestState.TESTING
+        testJob = viewModelScope.launch {
+            val reachable = relayClient.probe(base)
+            if (customEndpoint.value == base) {
+                _customEndpointTest.value = if (reachable) {
+                    EndpointTestState.REACHABLE
+                } else {
+                    EndpointTestState.UNREACHABLE
+                }
+            }
+        }
+    }
+
+    /**
+     * A connected Qobuz account exists. What the connect form keys on, because
+     * [qobuzConnectedEmail] is null for a MIGRATED pasted token — keying on the
+     * email showed that user a sign-in form and no way to remove a dead token.
+     */
+    val qobuzHasLogin: StateFlow<Boolean> =
+        qbdlxCredentialStore.hasLogin
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    /**
+     * Connected Qobuz account email (null = not connected, OR a migrated token).
+     *
+     * Reactive, so it cannot drift from the routing row that reads the same flow.
+     * It used to be a MutableStateFlow filled by a coroutine off `init`, which lost
+     * the race against [losslessRouting]'s DataStore read often enough to show the
+     * email in the ROUTING row while the connect form 60dp below still read
+     * "Connected (token)" — telling a password user they had pasted a token.
+     */
+    val qobuzConnectedEmail: StateFlow<String?> =
+        qbdlxCredentialStore.connectedEmailFlow
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /** True while a connect attempt is in flight (spinner + disabled button). */
+    private val _qobuzConnecting = MutableStateFlow(false)
+    val qobuzConnecting: StateFlow<Boolean> = _qobuzConnecting
+
+    /** Last connect error to show, or null. Cleared on a new attempt / disconnect. */
+    private val _qobuzConnectError = MutableStateFlow<String?>(null)
+    val qobuzConnectError: StateFlow<String?> = _qobuzConnectError
+
+    init {
+        // Refresh on construction so the Diagnostics card shows the
+        // correct enabled/disabled state on first frame. Cheap (a
+        // single directory listing) — no need to rerun on every flow tick.
+        // Must follow _localState declaration: Kotlin initializes properties
+        // top-to-bottom and refreshDiagnostics() writes to _localState.
+        refreshDiagnostics()
+    }
+
+    /**
+     * v0.9.13: One-shot deep-link focus from Home banners. Read once on
+     * Settings entry; the screen scrolls the targeted card into view and
+     * clears the value so re-entry doesn't re-scroll. Null means "no
+     * focus requested — render Settings at the top as usual".
+     */
+    fun consumeDeepLinkFocus(): com.luma.core.data.navigation.SettingsFocus? =
+        settingsDeepLinkController.consume()
+
+    // Phase 8: `blockedCount` + `onRunYtLibraryBackfill` relocated to
+    // SyncViewModel — the Blocked Songs + Fix-wrong-version rows moved
+    // out of Settings into the Sync tab's Library section.
+
+    /**
+     * v0.9.13: count of tracks auto-saved to Spotify in the last 7 days.
+     * Re-anchors on every `autoSaveEnabled` flip so the `sinceMs` boundary
+     * is fresh whenever the user revisits Settings — no need to reschedule
+     * a cron-style refresh just for a diagnostics line.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val autoSavedCountLast7Days: kotlinx.coroutines.flow.Flow<Int> =
+        likePreferences.autoSaveEnabled.flatMapLatest {
+            trackDao.autoSavedSinceCount(
+                System.currentTimeMillis() - 7L * 24 * 3600 * 1000,
+            )
+        }
+
+    /**
+     * The main UI state, combining reactive auth states from [TokenManager],
+     * the persisted quality tier, and local UI state.
+     */
+    val uiState: StateFlow<SettingsUiState> = combine(
+        tokenManager.spotifyAuthState,
+        tokenManager.youTubeAuthState,
+        tokenManager.discordAuthState,
+        musicRepository.getTrackCount(),
+        librarySizeHolder.size,
+        qualityPreference.qualityTier,
+        themePreference.themeMode,
+        storagePreference.externalTreeUri,
+        moveLibraryCoordinator.state,
+        lastFmSessionPreference.session,
+        listeningEventDao.pendingScrobbleCount(),
+        downloadNetworkPreference.mode,
+        _localState,
+        youTubeHistoryPreference.enabled,
+        youTubeHistoryScrobbler.health,
+        listeningEventDao.pendingYtScrobbleCount(),
+        losslessPrefs.enabled,
+        losslessPrefs.captchaCookieValue,
+        losslessPrefs.qualityTier,
+        qobuzSource.lastKnownBadCookie,
+        likePreferences.autoSaveEnabled,
+        likePreferences.autoSaveThreshold,
+        likePreferences.heartDefaultLuma,
+        likePreferences.heartDefaultSpotify,
+        likePreferences.heartDefaultYtMusic,
+        autoSavedCountLast7Days,
+        losslessPrefs.youtubeFallbackEnabled,
+        lumaMixPreference.enabled,
+        likePreferences.mirrorLikesSpotify,
+        likePreferences.mirrorLikesYtMusic,
+        streamingQualityPrefs.wifiTier,
+        streamingQualityPrefs.cellularTier,
+        streamingQualityPrefs.saveData,
+        themePreference.amoledDark,
+        homeDiscoveryPreference.enabled,
+        nowPlayingPreference.ambientAnimationEnabled,
+        nowPlayingPreference.ambientStyle,
+        homeSectionsPreference.order,
+        homeSectionsPreference.hidden,
+        homeSectionsPreference.showLikedOnHome,
+        homeSectionsPreference.communityOn,
+        storagePreference.libraryLayout,
+        reorganizeLibraryCoordinator.state,
+    ) { values ->
+        // Read strictly in the order the flows are declared above. See [Values]:
+        // there are no positional indices to renumber, and requireExhausted()
+        // below turns "a flow was added and nobody updated the reads" into an
+        // immediate, named failure instead of silently shifted data.
+        val v = Values(values)
+        val spotifyAuth = v.next<AuthState>()
+        val youTubeAuth = v.next<AuthState>()
+        val discordAuth = v.next<AuthState>()
+        val trackCount = v.next<Int>()
+        val storageBytes = (v.next<LibrarySizeBreakdown>()).totalBytes
+        val quality = v.next<QualityTier>()
+        val theme = v.next<ThemeMode>()
+        val externalTree = v.next<Uri?>()
+        val moveState = v.next<MoveLibraryState>()
+        val lastFmSession = v.next<LastFmSession?>()
+        val pendingScrobbles = v.next<Int>()
+        val downloadNetworkMode = v.next<DownloadNetworkMode>()
+        val local = v.next<LocalState>()
+        val ytHistoryEnabled = v.next<Boolean>()
+        val ytHistoryHealth = v.next<YouTubeScrobblerHealth>()
+        val ytPendingCount = v.next<Int>()
+        val losslessEnabled = v.next<Boolean>()
+        val squidWtfCaptchaCookie = (v.next<String?>()).orEmpty()
+        val losslessQualityTier = v.next<LosslessQualityTier>()
+        val lastKnownBadCookie = v.next<String?>()
+        val autoSaveEnabled = v.next<Boolean>()
+        val autoSaveThreshold = v.next<Int>()
+        val heartDefaultLuma = v.next<Boolean>()
+        val heartDefaultSpotify = v.next<Boolean>()
+        val heartDefaultYtMusic = v.next<Boolean>()
+        val autoSavedCount7d = v.next<Int>()
+        val youtubeFallbackEnabled = v.next<Boolean>()
+        val lumaMixesEnabled = v.next<Boolean>()
+        val mirrorLikesSpotify = v.next<Boolean>()
+        val mirrorLikesYtMusic = v.next<Boolean>()
+        val streamingWifiTier = v.next<LosslessQualityTier>()
+        val streamingCellularTier = v.next<LosslessQualityTier>()
+        val streamingSaveData = v.next<Boolean>()
+        val amoledDark = v.next<Boolean>()
+        val qobuzDiscoveryEnabled = v.next<Boolean>()
+        val ambientAnimationEnabled = v.next<Boolean>()
+        val ambientStyle = v.next<com.luma.core.data.prefs.AmbientStyle>()
+        @Suppress("UNCHECKED_CAST")
+        val homeSectionOrder = v.next<List<com.luma.core.data.prefs.HomeSection>>()
+        @Suppress("UNCHECKED_CAST")
+        val homeSectionsHidden = v.next<Set<com.luma.core.data.prefs.HomeSection>>()
+        val showLikedOnHome = v.next<Boolean>()
+        val communityOn = v.next<Boolean>()
+        val libraryLayout = v.next<com.luma.core.data.prefs.LibraryLayout>()
+        val reorganizeState = v.next<ReorganizeLibraryState>()
+        v.requireExhausted()
+
+        val lastFmState: LastFmAuthState = local.lastFmAuthOverride
+            ?: when {
+                !lastFmCredentials.isConfigured -> LastFmAuthState.NotConfigured
+                lastFmSession != null -> LastFmAuthState.Connected(
+                    username = lastFmSession.username,
+                    pendingScrobbles = pendingScrobbles,
+                )
+                else -> LastFmAuthState.Disconnected
+            }
+
+        SettingsUiState(
+            spotifyAuthState = spotifyAuth,
+            youTubeAuthState = youTubeAuth,
+            discordAuthState = discordAuth,
+            audioQuality = quality,
+            themeMode = theme,
+            amoledDark = amoledDark,
+            downloadNetworkMode = downloadNetworkMode,
+            totalStorageBytes = storageBytes,
+            totalTracks = trackCount,
+            showSpotifyWebLogin = local.showSpotifyWebLogin,
+            showYouTubeWebLogin = local.showYouTubeWebLogin,
+            showYouTubeCookieDialog = local.showYouTubeCookieDialog,
+            showSpotifyCookieDialog = local.showSpotifyCookieDialog,
+            spotifyCookieError = local.spotifyCookieError,
+            isSpotifyCookieValidating = local.isSpotifyCookieValidating,
+            youTubeCookieError = local.youTubeCookieError,
+            isYouTubeCookieValidating = local.isYouTubeCookieValidating,
+            youTubeError = local.youTubeError,
+            showDiscordWebLogin = local.showDiscordWebLogin,
+            showDiscordTokenDialog = local.showDiscordTokenDialog,
+            discordTokenError = local.discordTokenError,
+            isDiscordTokenValidating = local.isDiscordTokenValidating,
+            externalTreeUri = externalTree,
+            moveLibraryState = moveState,
+            libraryLayout = libraryLayout,
+            reorganizeLibraryState = reorganizeState,
+            lastFmState = lastFmState,
+            isScrobbleDraining = local.isScrobbleDraining,
+            scrobbleDrainResult = local.lastScrobbleDrainResult,
+            ytHistoryEnabled = ytHistoryEnabled,
+            lumaMixesEnabled = lumaMixesEnabled,
+            qobuzDiscoveryEnabled = qobuzDiscoveryEnabled,
+            ambientAnimationEnabled = ambientAnimationEnabled,
+            ambientStyle = ambientStyle,
+            homeSectionOrder = homeSectionOrder,
+            homeSectionsHidden = homeSectionsHidden,
+            showLikedOnHome = showLikedOnHome,
+            communityOn = communityOn,
+            ytHistoryHealth = ytHistoryHealth,
+            ytPendingCount = ytPendingCount,
+            losslessEnabled = losslessEnabled,
+            squidWtfCaptchaCookie = squidWtfCaptchaCookie,
+            squidCaptchaStatus = squidCaptchaStatus(squidWtfCaptchaCookie, lastKnownBadCookie),
+            losslessQualityTier = losslessQualityTier,
+            streamingWifiTier = streamingWifiTier,
+            streamingCellularTier = streamingCellularTier,
+            streamingSaveData = streamingSaveData,
+            autoSaveEnabled = autoSaveEnabled,
+            autoSaveThreshold = autoSaveThreshold,
+            heartDefaultLuma = heartDefaultLuma,
+            heartDefaultSpotify = heartDefaultSpotify,
+            heartDefaultYtMusic = heartDefaultYtMusic,
+            autoSavedCountLast7Days = autoSavedCount7d,
+            mirrorLikesSpotify = mirrorLikesSpotify,
+            mirrorLikesYtMusic = mirrorLikesYtMusic,
+            pendingMirrorWarning = local.pendingMirrorWarning,
+            youtubeFallbackEnabled = youtubeFallbackEnabled,
+            hasCrashReport = local.hasCrashReport,
+            databaseBackupState = local.databaseBackupState,
+            showImportConfirmation = local.showImportConfirmation,
+        )
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5_000),
+        initialValue = SettingsUiState(),
+    )
+
+    // -- Storage actions ------------------------------------------------------
+
+    /** Recomputes storage usage from the configured library filesystem. */
+    fun refreshStorageUsage() {
+        librarySizeHolder.refresh()
+    }
+
+    /**
+     * Persists the user's chosen SAF tree URI (or null to revert to
+     * internal). Callers MUST have already called
+     * `ContentResolver.takePersistableUriPermission(uri, ...)` before
+     * invoking this — the persisted URI is useless without the sticky
+     * permission and would fail at write time.
+     */
+    fun setExternalStorageUri(uri: Uri?) {
+        viewModelScope.launch {
+            storagePreference.setExternalTreeUri(uri)
+        }
+    }
+
+    /**
+     * Counts how many downloaded tracks still live in internal storage —
+     * used by the Settings UI to decide whether to surface the "Move
+     * library" action.
+     */
+    suspend fun countMovableTracks(): Int = moveLibraryCoordinator.countMovableTracks()
+
+    /** Starts the library-move job on the coordinator's app-scoped job. */
+    fun startMoveLibrary(targetUri: Uri) {
+        moveLibraryCoordinator.start(targetUri)
+    }
+
+    /** Cancels an in-progress move. State reverts to Idle. */
+    fun cancelMoveLibrary() {
+        moveLibraryCoordinator.cancel()
+    }
+
+    /** Dismisses a terminal Done/Error state, returning to Idle. */
+    fun dismissMoveLibrary() {
+        moveLibraryCoordinator.dismiss()
+    }
+
+    // -- Folder structure (#198 / #104) ---------------------------------------
+
+    /**
+     * Persists the folder structure new downloads are filed under. Does not
+     * move existing files — the user opts into that with [startReorganize].
+     */
+    fun setLibraryLayout(layout: com.luma.core.data.prefs.LibraryLayout) {
+        viewModelScope.launch {
+            storagePreference.setLibraryLayout(layout)
+        }
+    }
+
+    /** Starts the reorganize job on the coordinator's app-scoped job. */
+    fun startReorganize() {
+        reorganizeLibraryCoordinator.start()
+    }
+
+    /** Cancels an in-progress reorganize. State reverts to Idle. */
+    fun cancelReorganize() {
+        reorganizeLibraryCoordinator.cancel()
+    }
+
+    /** Dismisses a terminal Done/Error state, returning to Idle. */
+    fun dismissReorganize() {
+        reorganizeLibraryCoordinator.dismiss()
+    }
+
+    /**
+     * Counts downloaded tracks whose on-disk location doesn't already match
+     * the chosen structure — used by the Settings UI to gate and label the
+     * "Reorganize" action.
+     */
+    suspend fun countMisplacedTracks(): Int =
+        runCatching { reorganizeLibraryCoordinator.countMisplacedTracks() }.getOrDefault(0)
+
+    /**
+     * Triggers a database export to the chosen URI.
+     */
+    fun onExportDatabase(
+        uri: Uri,
+        scope: com.luma.core.data.db.BackupExportScope = com.luma.core.data.db.BackupExportScope.EVERYTHING,
+    ) {
+        viewModelScope.launch {
+            _localState.update { it.copy(databaseBackupState = DatabaseBackupState.Exporting) }
+            val result = databaseBackupManager.exportDatabase(uri, scope)
+            val what = when (scope) {
+                com.luma.core.data.db.BackupExportScope.EVERYTHING -> "Library and settings exported"
+                com.luma.core.data.db.BackupExportScope.LIBRARY_ONLY -> "Library exported"
+                com.luma.core.data.db.BackupExportScope.LIKES_ONLY -> "Liked songs exported"
+                com.luma.core.data.db.BackupExportScope.SETTINGS_ONLY -> "Settings exported"
+            }
+            _localState.update {
+                it.copy(
+                    databaseBackupState = result.fold(
+                        onSuccess = { DatabaseBackupState.Success(what) },
+                        onFailure = { t -> DatabaseBackupState.Error(t.message ?: "Export failed") }
+                    )
+                )
+            }
+        }
+    }
+
+    /**
+     * Triggers a database import from the chosen URI. The user picks a
+     * [BackupImportScope] in the confirmation dialog; scopes that swap files
+     * behind live singletons end with an app process kill to force a clean
+     * re-init, while LIBRARY_MERGE writes through the live database and just
+     * reports its tally.
+     */
+    fun onImportDatabase(uri: Uri) {
+        _localState.update { it.copy(showImportConfirmation = true, pendingImportUri = uri) }
+    }
+
+    /**
+     * Confirms the pending database import with the user-chosen [scope].
+     */
+    fun onConfirmImportDatabase(
+        scope: BackupImportScope,
+        onExternalPermissionNeeded: (Uri) -> Unit,
+    ) {
+        val uri = _localState.value.pendingImportUri ?: return
+        _localState.update { it.copy(showImportConfirmation = false, pendingImportUri = null) }
+
+        viewModelScope.launch {
+            _localState.update { it.copy(databaseBackupState = DatabaseBackupState.Importing) }
+            val result = databaseBackupManager.importDatabase(uri, scope)
+
+            if (result.isSuccess) {
+                val summary = result.getOrThrow()
+
+                // v0.9.x (#235): a library MERGE never swaps files — the data
+                // is already visible through the live Room instance — so we
+                // simply report what was added instead of restarting.
+                if (!summary.requiresRestart) {
+                    _localState.update {
+                        it.copy(
+                            databaseBackupState =
+                            DatabaseBackupState.Success(mergeSuccessMessage(summary)),
+                        )
+                    }
+                    return@launch
+                }
+
+                // The import manager peeks at the restored preferences
+                // to detect if an external storage folder was configured.
+                val restoredTreeUri = summary.restoredTreeUri
+
+                if (restoredTreeUri != null) {
+                    // Check if we ALREADY have the permission (maybe it's a restore over same install)
+                    val hasPermission = appContext.contentResolver.persistedUriPermissions.any {
+                        it.uri == restoredTreeUri && it.isReadPermission
+                    }
+
+                    if (hasPermission) {
+                        finishImportAndRestart()
+                    } else {
+                        // We need the user to re-grant permission for the restored folder
+                        // BEFORE we restart, so that the startup migrations can see the files.
+                        _localState.update { it.copy(databaseBackupState = DatabaseBackupState.Idle) }
+                        onExternalPermissionNeeded(restoredTreeUri)
+                    }
+                } else {
+                    finishImportAndRestart()
+                }
+            } else {
+                _localState.update {
+                    it.copy(
+                        databaseBackupState = DatabaseBackupState.Error(
+                            result.exceptionOrNull()?.message ?: "Import failed"
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    /** Human-readable tally for a completed [BackupImportScope.LIBRARY_MERGE]. */
+    private fun mergeSuccessMessage(summary: BackupImportResult): String {
+        val pluralTracks = if (summary.addedTracks == 1) "track" else "tracks"
+        val pluralPlaylists = if (summary.addedPlaylists == 1) "playlist" else "playlists"
+        val pluralEntries = if (summary.mergedMemberships == 1) "entry" else "entries"
+        return when {
+            summary.addedTracks == 0 && summary.addedPlaylists == 0 &&
+                summary.mergedMemberships == 0 ->
+                "Nothing new to import — your library already contains everything from this backup."
+            else -> "Merge complete — added ${summary.addedTracks} new $pluralTracks, " +
+                "${summary.addedPlaylists} new $pluralPlaylists, and " +
+                "${summary.mergedMemberships} playlist $pluralEntries. Settings were left untouched."
+        }
+    }
+
+    private suspend fun finishImportAndRestart() {
+        _localState.update {
+            it.copy(databaseBackupState = DatabaseBackupState.Success("Database imported. Restarting..."))
+        }
+        kotlinx.coroutines.delay(1500)
+
+        // Re-launch the activity and kill the current process to ensure all
+        // components (Room, DataStore, Tink) re-initialize with the restored data.
+        val intent = appContext.packageManager.getLaunchIntentForPackage(appContext.packageName)
+        if (intent != null) {
+            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK)
+            appContext.startActivity(intent)
+        }
+        android.os.Process.killProcess(android.os.Process.myPid())
+    }
+
+    /**
+     * Cancels the pending database import.
+     */
+    fun onCancelImportDatabase() {
+        _localState.update { it.copy(showImportConfirmation = false, pendingImportUri = null) }
+    }
+
+    /** Dismisses the backup Success/Error overlay. */
+    fun onDismissDatabaseBackupStatus() {
+        _localState.update { it.copy(databaseBackupState = DatabaseBackupState.Idle) }
+    }
+
+    // -- Last.fm actions ------------------------------------------------------
+
+    /**
+     * Step 1 of the Last.fm web-auth flow: request a one-shot auth token
+     * from Last.fm and transition to [LastFmAuthState.AwaitingAuth]. The
+     * screen is expected to open the user's browser to
+     * `https://www.last.fm/api/auth/?api_key=X&token=Y` so they can
+     * approve. Returns the URL to open so the screen can hand it to
+     * UriHandler.
+     */
+    fun onConnectLastFm(onUrlReady: (String) -> Unit) {
+        viewModelScope.launch {
+            val tokenResult = lastFmApiClient.getAuthToken()
+            tokenResult.fold(
+                onSuccess = { token ->
+                    _localState.update {
+                        it.copy(lastFmAuthOverride = LastFmAuthState.AwaitingAuth(token))
+                    }
+                    val url = "https://www.last.fm/api/auth/?api_key=" +
+                        "${lastFmCredentials.apiKey}&token=$token"
+                    onUrlReady(url)
+                },
+                onFailure = { t ->
+                    _localState.update {
+                        it.copy(
+                            lastFmAuthOverride = LastFmAuthState.Error(
+                                t.message ?: "Couldn't request Last.fm auth token",
+                            ),
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    /**
+     * Step 2: user has approved in their browser, back in LUMA they tap
+     * "Finish connecting." Exchange the stored token for a session key.
+     */
+    fun onFinishLastFmAuth() {
+        val override = _localState.value.lastFmAuthOverride
+        if (override !is LastFmAuthState.AwaitingAuth) return
+        viewModelScope.launch {
+            val result = lastFmApiClient.getSession(override.token)
+            result.fold(
+                onSuccess = { (username, sessionKey) ->
+                    lastFmSessionPreference.save(LastFmSession(username, sessionKey))
+                    // Issue #255: the connection just became a SOURCE. Reconcile
+                    // so "Recommended by Last.fm" activates now — the user sees
+                    // it on the Sync tab without restarting.
+                    // kickRefresh: the user is watching the Sync tab right
+                    // now — without it the new playlist sits empty until the
+                    // next daily cycle or app restart.
+                    runCatching { lastFmRecommendationSource.reconcile(kickRefresh = true) }
+                        .onFailure { android.util.Log.w("SettingsVM", "lastfm reconcile failed", it) }
+                    // Clear the override — the session flow now drives Connected state.
+                    _localState.update { it.copy(lastFmAuthOverride = null) }
+                },
+                onFailure = { t ->
+                    _localState.update {
+                        it.copy(
+                            lastFmAuthOverride = LastFmAuthState.Error(
+                                t.message ?: "Couldn't finish Last.fm connection. " +
+                                    "Did you tap Allow on Last.fm's website?",
+                            ),
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    /** Forget the Last.fm session + stop scrobbling. */
+    fun onDisconnectLastFm() {
+        viewModelScope.launch {
+            lastFmSessionPreference.clear()
+            // Issue #255: no session → no source. Deactivate the recipe and
+            // hide its playlist; nothing is deleted, reconnect restores it.
+            runCatching { lastFmRecommendationSource.reconcile() }
+                .onFailure { android.util.Log.w("SettingsVM", "lastfm reconcile failed", it) }
+            _localState.update { it.copy(lastFmAuthOverride = null) }
+        }
+    }
+
+    /** Dismiss a Last.fm error banner and return to Disconnected. */
+    fun onDismissLastFmError() {
+        _localState.update { it.copy(lastFmAuthOverride = null) }
+    }
+
+    /**
+     * Manually drain the pending Last.fm scrobble queue. Triggered from
+     * the Settings "Sync scrobbles now" button. Result is surfaced via a
+     * one-shot flag on LocalState so the UI can show a snackbar like
+     * "Sent 312 scrobbles" — the reactive pending-count Flow keeps the
+     * subtitle under the button accurate on its own.
+     */
+    fun onSyncScrobblesNow() {
+        viewModelScope.launch {
+            _localState.update { it.copy(isScrobbleDraining = true) }
+            val result = runCatching { lastFmScrobbler.drainNow() }.getOrNull()
+            _localState.update {
+                it.copy(
+                    isScrobbleDraining = false,
+                    lastScrobbleDrainResult = result,
+                )
+            }
+        }
+    }
+
+    /** UI acknowledgement of the drain snackbar. */
+    fun onClearScrobbleDrainResult() {
+        _localState.update { it.copy(lastScrobbleDrainResult = null) }
+    }
+
+    // -- Spotify actions ------------------------------------------------------
+
+    /**
+     * Opens the Spotify WebView login flow. The user signs in via Spotify's
+     * own login page and the app extracts the sp_dc cookie automatically.
+     */
+    fun onConnectSpotify() {
+        _localState.update {
+            it.copy(showSpotifyWebLogin = true)
+        }
+    }
+
+    /**
+     * Fallback: opens the manual sp_dc cookie paste dialog for users who
+     * prefer to extract the cookie themselves.
+     */
+    fun onConnectSpotifyManual() {
+        _localState.update {
+            it.copy(
+                showSpotifyWebLogin = false,
+                showSpotifyCookieDialog = true,
+                spotifyCookieError = null,
+                isSpotifyCookieValidating = false,
+            )
+        }
+    }
+
+    /** Dismisses the WebView login screen. */
+    fun onDismissSpotifyWebLogin() {
+        _localState.update { it.copy(showSpotifyWebLogin = false) }
+    }
+
+    /**
+     * Called by the WebView login when an sp_dc cookie is successfully
+     * extracted from the Spotify session. Validates it the same way the
+     * manual paste flow does.
+     */
+    fun onSpotifyWebLoginCookieExtracted(spDcCookie: String) {
+        _localState.update { it.copy(showSpotifyWebLogin = false) }
+        onConnectSpotifyWithCookie(spDcCookie)
+    }
+
+    /**
+     * Validates the user-provided sp_dc cookie and connects their Spotify account.
+     *
+     * Calls [TokenManager.connectSpotifyWithCookie] which exchanges the cookie for
+     * an access token. On success the dialog is dismissed; on failure an error
+     * message is displayed in the dialog.
+     *
+     * @param cookie The raw sp_dc cookie value pasted by the user.
+     */
+    fun onConnectSpotifyWithCookie(cookie: String, username: String = "") {
+        if (cookie.isBlank()) {
+            _localState.update { it.copy(spotifyCookieError = "Cookie cannot be empty") }
+            return
+        }
+
+        viewModelScope.launch {
+            _localState.update {
+                it.copy(isSpotifyCookieValidating = true, spotifyCookieError = null)
+            }
+
+            val success = tokenManager.connectSpotifyWithCookie(cookie, username)
+
+            if (success) {
+                _localState.update {
+                    it.copy(
+                        showSpotifyCookieDialog = false,
+                        spotifyCookieError = null,
+                        isSpotifyCookieValidating = false,
+                    )
+                }
+            } else {
+                _localState.update {
+                    it.copy(
+                        spotifyCookieError = "Invalid or expired sp_dc cookie. Please try again.",
+                        isSpotifyCookieValidating = false,
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Dismisses the Spotify cookie input dialog without connecting.
+     */
+    fun onDismissSpotifyCookieDialog() {
+        _localState.update {
+            it.copy(
+                showSpotifyCookieDialog = false,
+                spotifyCookieError = null,
+                isSpotifyCookieValidating = false,
+            )
+        }
+    }
+
+    /**
+     * Disconnects the Spotify account by clearing all stored credentials.
+     */
+    fun onDisconnectSpotify() {
+        viewModelScope.launch {
+            musicRepository.cancelPendingDownloadsForSource("SPOTIFY")
+            tokenManager.clearAuth(AuthService.SPOTIFY)
+        }
+    }
+
+    // -- YouTube actions ------------------------------------------------------
+
+    /**
+     * Opens the YouTube Music WebView login flow. The user signs in via
+     * Google's own page inside the WebView and the app extracts the full
+     * cookie string (SAPISID + LOGIN_INFO at minimum) automatically.
+     *
+     * Phase 1 spike: this is the new primary entry point. The manual
+     * cookie paste dialog stays available via [onConnectYouTubeManual]
+     * for users who hit the Google "browser not secure" block.
+     */
+    fun onConnectYouTube() {
+        _localState.update {
+            it.copy(showYouTubeWebLogin = true)
+        }
+    }
+
+    /**
+     * Fallback: opens the manual cookie paste dialog. Triggered from
+     * the WebView's "Paste cookie" toolbar action when the WebView path
+     * is blocked or otherwise unwanted.
+     */
+    fun onConnectYouTubeManual() {
+        _localState.update {
+            it.copy(
+                showYouTubeWebLogin = false,
+                showYouTubeCookieDialog = true,
+                youTubeCookieError = null,
+                isYouTubeCookieValidating = false,
+            )
+        }
+    }
+
+    /** Dismisses the YouTube WebView login screen. */
+    fun onDismissYouTubeWebLogin() {
+        _localState.update { it.copy(showYouTubeWebLogin = false) }
+    }
+
+    /**
+     * Called by the WebView login when the YouTube session cookies are
+     * successfully harvested. Validates and persists via the same flow
+     * the manual paste path uses.
+     */
+    fun onYouTubeWebLoginCookieExtracted(cookies: String) {
+        _localState.update { it.copy(showYouTubeWebLogin = false) }
+        onConnectYouTubeWithCookie(cookies)
+    }
+
+    /**
+     * Validates the user-provided YouTube Music cookie and connects their account.
+     *
+     * The cookie must contain a SAPISID or __Secure-3PAPISID value which is
+     * used for SAPISIDHASH authentication with the InnerTube API.
+     *
+     * @param cookie The full cookie string from the user's music.youtube.com browser session.
+     */
+    fun onConnectYouTubeWithCookie(cookie: String) {
+        if (cookie.isBlank()) {
+            _localState.update { it.copy(youTubeCookieError = "Cookie cannot be empty") }
+            return
+        }
+
+        // Pre-validate before sending to TokenManager
+        val sapiSid = youTubeCookieHelper.extractSapiSid(cookie)
+        if (sapiSid == null) {
+            _localState.update {
+                it.copy(
+                    youTubeCookieError = "Missing SAPISID cookie. Make sure you copied the FULL " +
+                        "cookie header from music.youtube.com (Network tab > any request > Cookie header).",
+                )
+            }
+            return
+        }
+
+        if (!youTubeCookieHelper.hasLoginInfo(cookie)) {
+            _localState.update {
+                it.copy(
+                    youTubeCookieError = "Missing LOGIN_INFO cookie. yt-dlp requires LOGIN_INFO " +
+                        "to download. Make sure you're copying the complete Cookie header, not " +
+                        "individual cookies. The header should be one long string with many values " +
+                        "separated by semicolons.",
+                )
+            }
+            return
+        }
+
+        viewModelScope.launch {
+            _localState.update {
+                it.copy(isYouTubeCookieValidating = true, youTubeCookieError = null)
+            }
+
+            val success = tokenManager.connectYouTubeWithCookie(cookie)
+
+            if (success) {
+                _localState.update {
+                    it.copy(
+                        showYouTubeCookieDialog = false,
+                        youTubeCookieError = null,
+                        isYouTubeCookieValidating = false,
+                    )
+                }
+            } else {
+                _localState.update {
+                    it.copy(
+                        youTubeCookieError = "Failed to save cookie. Please try again.",
+                        isYouTubeCookieValidating = false,
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Dismisses the YouTube cookie input dialog without connecting.
+     */
+    fun onDismissYouTubeCookieDialog() {
+        _localState.update {
+            it.copy(
+                showYouTubeCookieDialog = false,
+                youTubeCookieError = null,
+                isYouTubeCookieValidating = false,
+            )
+        }
+    }
+
+    /**
+     * Disconnects the YouTube account by clearing stored credentials.
+     */
+    fun onDisconnectYouTube() {
+        viewModelScope.launch {
+            musicRepository.cancelPendingDownloadsForSource("YOUTUBE")
+            tokenManager.clearAuth(AuthService.YOUTUBE_MUSIC)
+        }
+    }
+
+    /**
+     * Dismisses the YouTube error dialog.
+     */
+    fun onDismissYouTubeError() {
+        _localState.update { it.copy(youTubeError = null) }
+    }
+
+    // -- Discord actions --------------------------------------------------
+
+    fun onConnectDiscord() {
+        _localState.update { it.copy(showDiscordWebLogin = true) }
+    }
+
+    fun onConnectDiscordManual() {
+        _localState.update {
+            it.copy(
+                showDiscordWebLogin = false,
+                showDiscordTokenDialog = true,
+                discordTokenError = null,
+                isDiscordTokenValidating = false,
+            )
+        }
+    }
+
+    fun onDismissDiscordWebLogin() {
+        _localState.update { it.copy(showDiscordWebLogin = false) }
+    }
+
+    fun onDiscordWebLoginTokenExtracted(token: String) {
+        _localState.update { it.copy(showDiscordWebLogin = false) }
+        onConnectDiscordWithToken(token)
+    }
+
+    fun onConnectDiscordWithToken(token: String) {
+        if (token.isBlank()) {
+            _localState.update { it.copy(discordTokenError = "Token cannot be empty") }
+            return
+        }
+        viewModelScope.launch {
+            _localState.update { it.copy(isDiscordTokenValidating = true, discordTokenError = null) }
+            val success = tokenManager.connectDiscordWithToken(token)
+            if (success) {
+                _localState.update {
+                    it.copy(
+                        showDiscordTokenDialog = false,
+                        discordTokenError = null,
+                        isDiscordTokenValidating = false,
+                    )
+                }
+            } else {
+                _localState.update {
+                    it.copy(
+                        discordTokenError = "Invalid or expired token. Please try again.",
+                        isDiscordTokenValidating = false,
+                    )
+                }
+            }
+        }
+    }
+
+    fun onDismissDiscordTokenDialog() {
+        _localState.update {
+            it.copy(
+                showDiscordTokenDialog = false,
+                discordTokenError = null,
+                isDiscordTokenValidating = false,
+            )
+        }
+    }
+
+    fun onDisconnectDiscord() {
+        viewModelScope.launch {
+            discordRpcCoordinator.updateNowPlaying("", "", "", null, 0L, 0L, isPlaying = false)
+            tokenManager.clearAuth(AuthService.DISCORD)
+        }
+    }
+
+    val discordNeedsPresenceConsent: StateFlow<Boolean> = discordRpcCoordinator.needsPresenceConsent
+
+    /** [openUrl] returns whether a browser actually opened; if none did, the button stays so the user can retry. */
+    fun onDiscordFinishConnecting(openUrl: (String) -> Boolean) {
+        if (openUrl(com.luma.core.data.discord.DiscordRpcConfig.consentUrl())) {
+            discordRpcCoordinator.consentHandled()
+        }
+    }
+
+    // -- Quality --------------------------------------------------------------
+
+    /**
+     * Updates the preferred audio quality tier and persists it to DataStore.
+     *
+     * @param tier The new [QualityTier] to use for future downloads.
+     */
+    fun onQualityChanged(tier: QualityTier) {
+        viewModelScope.launch {
+            qualityPreference.setQualityTier(tier)
+        }
+    }
+
+    /** Persists the user's selected theme mode. Flows into MainActivity via Hilt. */
+    fun onThemeChanged(mode: ThemeMode) {
+        viewModelScope.launch {
+            themePreference.setThemeMode(mode)
+        }
+    }
+
+    // ── Sleep timer (fork issue ParaliyzedEvo/LUMA#26) ─────────────────
+    val sleepTimerState = sleepTimerController.state
+    fun onSleepTimerMinutes(minutes: Int) = sleepTimerController.startMinutes(minutes)
+    fun onSleepTimerEndOfTrack() = sleepTimerController.stopAtEndOfTrack()
+    fun onSleepTimerCancel() = sleepTimerController.cancel()
+
+    /** Persists the pure-black (AMOLED) dark preference. */
+    fun onAmoledDarkChanged(enabled: Boolean) {
+        viewModelScope.launch {
+            themePreference.setAmoledDark(enabled)
+        }
+    }
+
+    /**
+     * Persists a new download-network mode AND re-schedules the two
+     * workers that depend on it ([LumaDiscoveryWorker],
+     * [TagEnrichmentWorker]) so the updated `Constraints` take effect
+     * immediately. WorkManager snapshots constraints at enqueue time —
+     * without the re-schedule, the setting would only apply to future
+     * installs, not the current one.
+     */
+    fun onDownloadNetworkModeChanged(mode: DownloadNetworkMode) {
+        viewModelScope.launch {
+            downloadNetworkPreference.setMode(mode)
+            LumaDiscoveryWorker.schedulePeriodic(appContext, mode)
+            TagEnrichmentWorker.schedulePeriodic(appContext, mode)
+        }
+    }
+
+    // -- YouTube History actions ----------------------------------------------
+
+    /** Flip the YT-history opt-in. Settings screen shows the first-enable
+     *  dialog; by the time this is called, the user has already confirmed. */
+    fun onYouTubeHistoryEnabledChanged(enabled: Boolean) {
+        viewModelScope.launch {
+            youTubeHistoryPreference.setEnabled(enabled)
+        }
+    }
+
+    /**
+     * v0.9.26 — flip the LUMA-Mixes opt-out. Persists the pref AND triggers
+     * the orchestrator that cancels/re-schedules the five background workers
+     * and flips `is_active` on the built-in recipes + playlists. See
+     * [com.luma.core.data.repository.MusicRepository.applyLumaMixesEnabled].
+     */
+    fun onLumaMixesEnabledChanged(enabled: Boolean) {
+        viewModelScope.launch {
+            lumaMixPreference.setEnabled(enabled)
+            runCatching { musicRepository.applyLumaMixesEnabled(enabled) }
+                .onFailure { e ->
+                    android.util.Log.e("SettingsVM", "applyLumaMixesEnabled failed: ${e.message}", e)
+                }
+        }
+    }
+
+    /**
+     * Hide/show the Qobuz discovery sections on Home (New Releases, Qobuz
+     * Playlists, Top Albums + the genre chips). Pref-only — Home's
+     * discovery flow gates its own catalog fetches off this.
+     */
+    fun onQobuzDiscoveryEnabledChanged(enabled: Boolean) {
+        viewModelScope.launch { homeDiscoveryPreference.setEnabled(enabled) }
+    }
+
+    /** Ambient animated background on Now Playing (Settings > Appearance). */
+    fun onAmbientAnimationEnabledChanged(enabled: Boolean) {
+        viewModelScope.launch { nowPlayingPreference.setAmbientAnimationEnabled(enabled) }
+    }
+
+    /** How the Now Playing ambient moves (Settings > Appearance > Ambient style). */
+    fun onAmbientStyleChanged(style: com.luma.core.data.prefs.AmbientStyle) {
+        viewModelScope.launch { nowPlayingPreference.setAmbientStyle(style) }
+    }
+
+    /** Move a Home section one slot up/down (Settings > Appearance > Home layout). */
+    fun onHomeSectionMoved(section: com.luma.core.data.prefs.HomeSection, up: Boolean) {
+        viewModelScope.launch { homeSectionsPreference.move(section, up) }
+    }
+
+    /** Show/hide a Home section without forgetting its position. */
+    fun onHomeSectionHiddenChanged(section: com.luma.core.data.prefs.HomeSection, hide: Boolean) {
+        viewModelScope.launch { homeSectionsPreference.setHidden(section, hide) }
+    }
+
+    /** Merged Liked Songs card on Home's "Your playlists" rail. */
+    fun onShowLikedOnHomeChanged(shown: Boolean) {
+        viewModelScope.launch { homeSectionsPreference.setShowLikedOnHome(shown) }
+    }
+
+    /** Community's switch (Settings > Appearance > Home layout); the first time on, it moves to the top. */
+    fun onCommunityOnChanged(on: Boolean) {
+        viewModelScope.launch { homeSectionsPreference.setCommunityOn(on) }
+    }
+
+    /**
+     * Settings > Appearance > Open LUMA on (#428). Its own StateFlow rather than a
+     * [uiState] field: see [Values] on why new spokes stay out of that combine.
+     */
+    val startTab: StateFlow<StartTab> = homeSectionsPreference.startTab.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5_000),
+        StartTab.HOME,
+    )
+
+    fun onStartTabChanged(tab: StartTab) {
+        viewModelScope.launch { homeSectionsPreference.setStartTab(tab) }
+    }
+
+    /** Clear the kill-switch after PROTOCOL_BROKEN. Exposed to the Settings
+     *  UI's "Retry YouTube sync" button on the red health badge. */
+    fun onRetryYouTubeHistory() {
+        viewModelScope.launch {
+            youTubeScrobblerState.setDisabledReason(null)
+            youTubeScrobblerState.resetConsecutiveFailures()
+        }
+    }
+
+    // -- Lossless mode toggle ------------------------------------------------
+
+    /**
+     * Master switch for the lossless-source pipeline. When true, the
+     * download path tries the squid.wtf-proxied Qobuz registry before
+     * falling back to yt-dlp; when false (default), yt-dlp runs as it
+     * always has and the lossless code is dead at runtime.
+     */
+    fun onLosslessEnabledChanged(enabled: Boolean) {
+        viewModelScope.launch {
+            losslessPrefs.setEnabled(enabled)
+        }
+    }
+
+    /**
+     * Persist the user's lossless quality tier. Forward-only: existing
+     * downloaded tracks are unchanged. New downloads go out at the
+     * selected tier on the next sync.
+     */
+    fun onLosslessQualityTierChanged(tier: LosslessQualityTier) {
+        viewModelScope.launch {
+            losslessPrefs.setQualityTier(tier)
+        }
+    }
+
+    /**
+     * v0.9.17: opt-in YouTube fallback for the FLAC-only download path.
+     * When false (default), tracks with no lossless match sit in
+     * WAITING_FOR_LOSSLESS and the LosslessRetryWorker re-resolves them
+     * later. When true, yt-dlp takes over at the user's
+     * [QualityTier]; the pref's setter also requeues any deferred rows
+     * so the existing backlog drains immediately.
+     */
+    fun onYoutubeFallbackChanged(value: Boolean) {
+        viewModelScope.launch {
+            losslessPrefs.setYoutubeFallbackEnabled(value)
+        }
+    }
+
+    /**
+     * Persists the user-pasted `captcha_verified_at` cookie value
+     * for qobuz.squid.wtf. Empty / blank input clears the stored value.
+     * Whitespace is trimmed inside [LosslessSourcePreferences.setCaptchaCookieValue].
+     */
+    fun onSquidWtfCaptchaCookieChanged(value: String) {
+        viewModelScope.launch {
+            losslessPrefs.setCaptchaCookieValue(value)
+        }
+    }
+
+    // -- qbdlx (direct-Qobuz lossless, 5th source) ---------------------------
+
+    /**
+     * Connect the user's own Qobuz account (bring-your-own-account): logs in,
+     * and on success the token is stored with its signing pair so it serves real
+     * FLAC. Maps each failure to a message; never surfaces the password.
+     */
+    fun onConnectQobuz(email: String, password: String) {
+        if (email.isBlank() || password.isBlank()) {
+            _qobuzConnectError.value = "Enter your Qobuz email and password."
+            return
+        }
+        viewModelScope.launch {
+            _qobuzConnecting.value = true
+            _qobuzConnectError.value = null
+            when (qobuzAccountConnector.connect(email, password)) {
+                // Nothing to do: connect() wrote DataStore, so [qobuzConnectedEmail]
+                // and the ROUTING row both re-emit off that one write.
+                is QobuzLoginResult.Success -> Unit
+                QobuzLoginResult.InvalidCredentials ->
+                    _qobuzConnectError.value = "Wrong email or password."
+                QobuzLoginResult.FreeAccount ->
+                    _qobuzConnectError.value = "That account has no lossless subscription — Qobuz only serves FLAC to paid plans."
+                QobuzLoginResult.Error ->
+                    _qobuzConnectError.value = "Couldn't reach Qobuz. Check your connection and try again."
+            }
+            _qobuzConnecting.value = false
+        }
+    }
+
+    /** Disconnect the connected Qobuz account. */
+    fun onDisconnectQobuz() {
+        viewModelScope.launch {
+            qobuzAccountConnector.disconnect()
+            // The email clears itself — disconnect() removes the DataStore key.
+            _qobuzConnectError.value = null
+        }
+    }
+
+    // -- Streaming quality (per-network tiers + Save Data) -------------------
+
+    /** Persist the lossless tier requested when streaming on Wi-Fi. */
+    fun onStreamingWifiTierChanged(tier: LosslessQualityTier) =
+        viewModelScope.launch { streamingQualityPrefs.setWifiTier(tier) }
+
+    /** Persist the lossless tier requested when streaming on cellular. */
+    fun onStreamingCellularTierChanged(tier: LosslessQualityTier) =
+        viewModelScope.launch { streamingQualityPrefs.setCellularTier(tier) }
+
+    /** Persist the master Save-Data streaming override. */
+    fun onStreamingSaveDataChanged(value: Boolean) =
+        viewModelScope.launch { streamingQualityPrefs.setSaveData(value) }
+
+    /**
+     * Clear the rate-limiter's circuit breaker for the squid.wtf
+     * source. Useful when the breaker tripped on a transient outage
+     * and the user knows the source is back up — skips the 30-min
+     * organic timeout. No-op if the breaker isn't currently tripped.
+     */
+    fun onResetLosslessRateLimiter() {
+        viewModelScope.launch {
+            losslessRateLimiter.reset(QobuzSource.SOURCE_ID)
+        }
+    }
+
+    // -- Library & Likes (v0.9.13) ------------------------------------------
+
+    /**
+     * Master toggle for the auto-save scrobbler. When true,
+     * AutoSaveScrobbler observes plays and pushes tracks crossing the
+     * day-distinct-plays threshold into Spotify Liked Songs.
+     */
+    fun onAutoSaveEnabledChanged(value: Boolean) {
+        viewModelScope.launch { likePreferences.setAutoSaveEnabled(value) }
+    }
+
+    /**
+     * Persist the day-distinct-plays threshold (1..10). Values outside
+     * the range are coerced inside [LikePreferences.setAutoSaveThreshold].
+     */
+    fun onAutoSaveThresholdChanged(value: Int) {
+        viewModelScope.launch { likePreferences.setAutoSaveThreshold(value) }
+    }
+
+    /** Whether tapping the heart adds to the local LUMA Liked Songs playlist. */
+    fun onHeartDefaultLumaChanged(value: Boolean) {
+        viewModelScope.launch { likePreferences.setHeartDefaultLuma(value) }
+    }
+
+    /** Whether tapping the heart pushes to Spotify Liked Songs. */
+    fun onHeartDefaultSpotifyChanged(value: Boolean) {
+        viewModelScope.launch { likePreferences.setHeartDefaultSpotify(value) }
+    }
+
+    /** Whether tapping the heart pushes to YT Music Liked Music. */
+    fun onHeartDefaultYtMusicChanged(value: Boolean) {
+        viewModelScope.launch { likePreferences.setHeartDefaultYtMusic(value) }
+    }
+
+    /**
+     * v0.9.52 like-mirroring. Enabling a mirror requires the explicit
+     * "I understand" ack — the pref is only written on confirm (see
+     * [onMirrorWarningConfirmed]); disabling is immediate, no dialog.
+     */
+    fun onMirrorToggleRequested(destination: Destination, enable: Boolean) {
+        if (!enable) {
+            viewModelScope.launch { setMirrorPref(destination, false) }
+            return
+        }
+        _localState.update { it.copy(pendingMirrorWarning = destination) }
+    }
+
+    fun onMirrorWarningConfirmed() {
+        val destination = _localState.value.pendingMirrorWarning ?: return
+        _localState.update { it.copy(pendingMirrorWarning = null) }
+        viewModelScope.launch { setMirrorPref(destination, true) }
+    }
+
+    fun onMirrorWarningDismissed() {
+        _localState.update { it.copy(pendingMirrorWarning = null) }
+    }
+
+    private suspend fun setMirrorPref(destination: Destination, value: Boolean) {
+        when (destination) {
+            Destination.SPOTIFY -> likePreferences.setMirrorLikesSpotify(value)
+            Destination.YT_MUSIC -> likePreferences.setMirrorLikesYtMusic(value)
+            Destination.LAST_FM -> likePreferences.setMirrorLikesLastFm(value)
+            Destination.LUMA -> Unit // local likes are always on; not a mirror target
+        }
+    }
+
+    // -- Internal state -------------------------------------------------------
+
+    /**
+     * Local (non-persisted) state that is combined with reactive flows from
+     * [TokenManager], [MusicRepository], and [QualityPreference] to produce
+     * [SettingsUiState].
+     */
+    private data class LocalState(
+        val showSpotifyWebLogin: Boolean = false,
+        val showYouTubeWebLogin: Boolean = false,
+        val showYouTubeCookieDialog: Boolean = false,
+        val showSpotifyCookieDialog: Boolean = false,
+        val spotifyCookieError: String? = null,
+        val isSpotifyCookieValidating: Boolean = false,
+        val youTubeCookieError: String? = null,
+        val isYouTubeCookieValidating: Boolean = false,
+        val youTubeError: String? = null,
+        val showDiscordWebLogin: Boolean = false,
+        val showDiscordTokenDialog: Boolean = false,
+        val discordTokenError: String? = null,
+        val isDiscordTokenValidating: Boolean = false,
+        /**
+         * Transient Last.fm auth state used to override the session-flow-
+         * derived default. Non-null while we're mid-flow (AwaitingAuth
+         * after fetching a token) or showing an error. Cleared when the
+         * flow completes or the user dismisses the error.
+         */
+        val lastFmAuthOverride: LastFmAuthState? = null,
+        /** True while a manual scrobble-drain is in-flight. */
+        val isScrobbleDraining: Boolean = false,
+        /**
+         * Result of the most recent manual drain. Consumed by the UI
+         * (snackbar) and then cleared via [onClearScrobbleDrainResult].
+         */
+        val lastScrobbleDrainResult: LastFmScrobbler.DrainResult? = null,
+        /** Current status of the database backup operation. */
+        val databaseBackupState: DatabaseBackupState = DatabaseBackupState.Idle,
+        /** Whether the import confirmation dialog is showing. */
+        val showImportConfirmation: Boolean = false,
+        /** The URI of the database file chosen for import, while waiting for confirmation. */
+        val pendingImportUri: Uri? = null,
+        /**
+         * Last-known liveness of `cacheDir/crashes/`. Refreshed by
+         * [refreshDiagnostics] on Settings entry and again after the user
+         * taps share. Used by the Settings UI to enable/disable the
+         * "Share latest crash report" button + render its subtitle.
+         */
+        val hasCrashReport: Boolean = false,
+        /**
+         * v0.9.52: non-null while the like-mirroring "I understand" warning
+         * dialog is showing for that destination. The pref is only written
+         * on confirm, so dismissing leaves mirroring off.
+         */
+        val pendingMirrorWarning: Destination? = null,
+    )
+
+    // -- Diagnostics ----------------------------------------------------------
+
+    /**
+     * Re-list crash files and update [hasCrashReport]. Called on init and
+     * after share to keep the button's enabled state in sync with disk.
+     */
+    fun refreshDiagnostics() {
+        val present = crashFileStore.latestCrashFile() != null
+        _localState.update { it.copy(hasCrashReport = present) }
+    }
+
+    /**
+     * Returns the newest crash file paired with a content:// URI suitable
+     * for an ACTION_SEND share Intent — or null if no file exists. The
+     * screen wraps the result in the actual Intent and calls
+     * `Context.startActivity`. Refreshes [hasCrashReport] as a side effect
+     * so a missing file flips the button's state immediately.
+     */
+    fun latestCrashShareTarget(): CrashShareTarget? {
+        val file = crashFileStore.latestCrashFile()
+        if (file == null) {
+            _localState.update { it.copy(hasCrashReport = false) }
+            return null
+        }
+        return CrashShareTarget(
+            file = file,
+            contentUri = crashFileStore.shareUriFor(file),
+        )
+    }
+
+    /** Bundle returned by [latestCrashShareTarget]; the screen builds the Intent. */
+    data class CrashShareTarget(
+        val file: java.io.File,
+        val contentUri: android.net.Uri,
+    )
+}
+
+/**
+ * Sequential typed reader over the untyped `Array<Any?>` that Kotlin's vararg
+ * `combine` hands back.
+ *
+ * ## Why this exists
+ *
+ * `SettingsUiState` is assembled from one combine of every settings flow. Kotlin's `combine` is only typed up
+ * to five, so beyond that the lambda receives `Array<Any?>` and the values were read
+ * positionally: `values[27] as Boolean`, `values[28] as Boolean`, and so on.
+ *
+ * That made the flow list and the read list two parallel lists kept in sync by hand.
+ * Insert a source in the middle and every later index silently shifts — the cast
+ * still succeeds, the type still checks, and the UI quietly renders the wrong
+ * value. No test catches it, because every field still holds a valid value of the
+ * right type. It had already bent three separate changes around itself: two dead
+ * preferences survive cleanup because deleting them is unsafe, and ListenBrainz was
+ * exposed as standalone StateFlows specifically to avoid touching this.
+ *
+ * Reading sequentially removes the renumbering entirely — adding a flow means adding
+ * one `next()` in the matching position, with no indices to update. [requireExhausted]
+ * then turns the remaining mistake (a flow added or removed without a matching read)
+ * into an immediate, named failure instead of silently shifted data.
+ *
+ * **What this does not fix:** reordering two same-typed flows is still silent. The
+ * real remedy for that is structural — this is a hub-and-spoke Settings UI, so each
+ * spoke should observe its own small typed state rather than every screen sharing one
+ * many-source object. That is a larger change and deliberately not attempted here.
+ */
+private class Values(private val raw: Array<Any?>) {
+    private var cursor = 0
+
+    @Suppress("UNCHECKED_CAST")
+    fun <T> next(): T = raw[cursor++] as T
+
+    /** Fails loudly if the flow list and the read list have drifted apart. */
+    fun requireExhausted() {
+        check(cursor == raw.size) {
+            "SettingsViewModel.uiState read $cursor of ${raw.size} combined flows — " +
+                "a flow was added or removed without a matching next() call."
+        }
+    }
+}

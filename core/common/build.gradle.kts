@@ -1,8 +1,8 @@
 plugins {
-    id("stash.android.library")
+    id("luma.android.library")
 }
 android {
-    namespace = "com.stash.core.common"
+    namespace = "com.luma.core.common"
 }
 dependencies {
     implementation(libs.kotlinx.coroutines.android)

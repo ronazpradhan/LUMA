@@ -1,0 +1,1485 @@
+package com.luma.core.data.db
+
+import androidx.room.Database
+import androidx.room.RoomDatabase
+import androidx.room.TypeConverters
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
+import com.luma.core.data.db.converter.Converters
+import com.luma.core.data.db.dao.ArtistImageDao
+import com.luma.core.data.db.dao.ArtistProfileCacheDao
+import com.luma.core.data.db.dao.DiscoveryQueueDao
+import com.luma.core.data.db.dao.DownloadQueueDao
+import com.luma.core.data.db.dao.FlacUpgradeQueueDao
+import com.luma.core.data.db.dao.LastFmCacheDao
+import com.luma.core.data.db.dao.ListenSubmissionDao
+import com.luma.core.data.db.dao.SyncUndoDao
+import com.luma.core.data.db.dao.ListeningEventDao
+import com.luma.core.data.db.dao.LyricsDao
+import com.luma.core.data.db.dao.PlaylistDao
+import com.luma.core.data.db.dao.RemoteSnapshotDao
+import com.luma.core.data.db.dao.SharedMixDao
+import com.luma.core.data.db.dao.SourceAccountDao
+import com.luma.core.data.db.dao.SpotifyResolutionDao
+import com.luma.core.data.db.dao.LumaMixRecipeDao
+import com.luma.core.data.db.dao.SyncHistoryDao
+import com.luma.core.data.db.dao.TrackBlocklistDao
+import com.luma.core.data.db.dao.TrackDao
+import com.luma.core.data.db.dao.TrackSkipEventDao
+import com.luma.core.data.db.dao.TrackTagDao
+import com.luma.core.data.db.dao.WebLibraryExportDao
+import com.luma.core.data.db.entity.ArtistImageEntity
+import com.luma.core.data.db.entity.ArtistProfileCacheEntity
+import com.luma.core.data.db.entity.DiscoveryQueueEntity
+import com.luma.core.data.db.entity.DownloadQueueEntity
+import com.luma.core.data.db.entity.FlacUpgradeQueueEntity
+import com.luma.core.data.db.entity.LastFmCacheEntity
+import com.luma.core.data.db.entity.ListenSubmissionEntity
+import com.luma.core.data.db.entity.SyncUndoMembershipEntity
+import com.luma.core.data.db.entity.SyncUndoPlaylistEntity
+import com.luma.core.data.db.entity.SyncUndoPointEntity
+import com.luma.core.data.db.entity.ListeningEventEntity
+import com.luma.core.data.db.entity.LyricsEntity
+import com.luma.core.data.db.entity.PlaylistEntity
+import com.luma.core.data.db.entity.PlaylistTrackCrossRef
+import com.luma.core.data.db.entity.RemotePlaylistSnapshotEntity
+import com.luma.core.data.db.entity.RemoteTrackSnapshotEntity
+import com.luma.core.data.db.entity.SharedMixEntity
+import com.luma.core.data.db.entity.SourceAccountEntity
+import com.luma.core.data.db.entity.SpotifyResolutionEntity
+import com.luma.core.data.db.entity.LumaMixRecipeEntity
+import com.luma.core.data.db.entity.SyncHistoryEntity
+import com.luma.core.data.db.entity.TrackBlocklistEntity
+import com.luma.core.data.db.entity.TrackEntity
+import com.luma.core.data.db.entity.TrackFts
+import com.luma.core.data.db.entity.TrackSkipEventEntity
+import com.luma.core.data.db.entity.TrackTagEntity
+
+/**
+ * Central Room database for the LUMA application.
+ *
+ * Version 2 — adds remote playlist/track snapshot entities and
+ * a snapshot_id column on the playlists table.
+ *
+ * **Security note:** This database stores track metadata, playlists, sync
+ * diagnostics, and download queue state. It does NOT store authentication
+ * credentials (OAuth tokens, sp_dc cookies, etc.) — those live in
+ * [com.luma.core.auth.EncryptedTokenStore] backed by EncryptedSharedPreferences.
+ * The app manifest disables backups (`allowBackup=false`, `fullBackupContent=false`)
+ * to prevent database extraction via `adb backup`. On rooted devices the
+ * unencrypted SQLite file is still readable; adding SQLCipher encryption is a
+ * future enhancement tracked separately.
+ */
+@Database(
+    entities = [
+        TrackEntity::class,
+        PlaylistEntity::class,
+        PlaylistTrackCrossRef::class,
+        SyncHistoryEntity::class,
+        DownloadQueueEntity::class,
+        SourceAccountEntity::class,
+        TrackFts::class,
+        RemotePlaylistSnapshotEntity::class,
+        RemoteTrackSnapshotEntity::class,
+        ArtistProfileCacheEntity::class,
+        ListeningEventEntity::class,
+        TrackTagEntity::class,
+        LumaMixRecipeEntity::class,
+        DiscoveryQueueEntity::class,
+        TrackBlocklistEntity::class,
+        TrackSkipEventEntity::class,
+        LyricsEntity::class,
+        LastFmCacheEntity::class,
+        SpotifyResolutionEntity::class,
+        FlacUpgradeQueueEntity::class,
+        ListenSubmissionEntity::class,
+        SyncUndoPointEntity::class,
+        SyncUndoPlaylistEntity::class,
+        SyncUndoMembershipEntity::class,
+        ArtistImageEntity::class,
+        SharedMixEntity::class,
+    ],
+    version = 53,
+    exportSchema = true,
+)
+@TypeConverters(Converters::class)
+abstract class LumaDatabase : RoomDatabase() {
+
+    abstract fun trackDao(): TrackDao
+
+    abstract fun playlistDao(): PlaylistDao
+
+    abstract fun syncHistoryDao(): SyncHistoryDao
+
+    abstract fun downloadQueueDao(): DownloadQueueDao
+
+    abstract fun sourceAccountDao(): SourceAccountDao
+
+    abstract fun remoteSnapshotDao(): RemoteSnapshotDao
+
+    abstract fun artistProfileCacheDao(): ArtistProfileCacheDao
+
+    abstract fun artistImageDao(): ArtistImageDao
+
+    abstract fun listeningEventDao(): ListeningEventDao
+
+    abstract fun trackTagDao(): TrackTagDao
+
+    abstract fun lumaMixRecipeDao(): LumaMixRecipeDao
+
+    abstract fun discoveryQueueDao(): DiscoveryQueueDao
+
+    abstract fun trackBlocklistDao(): TrackBlocklistDao
+
+    abstract fun trackSkipEventDao(): TrackSkipEventDao
+
+    abstract fun lyricsDao(): LyricsDao
+
+    abstract fun lastFmCacheDao(): LastFmCacheDao
+
+    abstract fun spotifyResolutionDao(): SpotifyResolutionDao
+
+    abstract fun flacUpgradeQueueDao(): FlacUpgradeQueueDao
+
+    abstract fun listenSubmissionDao(): ListenSubmissionDao
+
+    abstract fun syncUndoDao(): SyncUndoDao
+
+    abstract fun sharedMixDao(): SharedMixDao
+
+    abstract fun webLibraryExportDao(): WebLibraryExportDao
+
+
+    companion object {
+        const val DATABASE_NAME = "stash.db"
+
+        /** v3 → v4: add sync_enabled column to playlists table. */
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE playlists ADD COLUMN sync_enabled INTEGER NOT NULL DEFAULT 1"
+                )
+            }
+        }
+
+        /** v4 → v5: add failure_type to download_queue, match_dismissed to tracks. */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE download_queue ADD COLUMN failure_type TEXT NOT NULL DEFAULT 'NONE'")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN match_dismissed INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /** v5 → v6: add rejected_video_id to download_queue for preview of closest rejected match. */
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE download_queue ADD COLUMN rejected_video_id TEXT DEFAULT NULL")
+            }
+        }
+
+        /** v6 → v7: add artist_profile_cache table for SWR artist pages. */
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS artist_profile_cache (
+                        artist_id TEXT NOT NULL PRIMARY KEY,
+                        json TEXT NOT NULL,
+                        fetched_at INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
+        /**
+         * v7 → v8: add listening_events table for local play history +
+         * optional Last.fm scrobbling. ForeignKey(tracks.id) cascades so
+         * rows are cleaned up if a track is deleted.
+         */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS listening_events (
+                        id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                        track_id INTEGER NOT NULL,
+                        started_at INTEGER NOT NULL,
+                        scrobbled INTEGER NOT NULL DEFAULT 0,
+                        FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_listening_events_track_id ON listening_events(track_id)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_listening_events_started_at ON listening_events(started_at)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_listening_events_scrobbled ON listening_events(scrobbled)")
+            }
+        }
+
+        /**
+         * v8 → v9: add match_flagged column to tracks so users can mark a
+         * wrongly-matched track from Now Playing and have it surface in the
+         * Failed Matches screen for re-match. Defaults to 0 so no existing
+         * row is retroactively flagged.
+         */
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE tracks ADD COLUMN match_flagged INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+        }
+
+        /**
+         * v9 → v10: add is_blacklisted column to tracks for the user-level
+         * "never download again" list. Defaults to 0. DiffWorker consults
+         * this during sync so blacklisted identities survive across sync
+         * runs without the track ever being re-queued.
+         */
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE tracks ADD COLUMN is_blacklisted INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+        }
+
+        /**
+         * v10 → v11: three new tables backing the LUMA Mixes feature —
+         * track_tags (Last.fm tag enrichment), stash_mix_recipes
+         * (declarative mix definitions), discovery_queue (Last.fm-sourced
+         * candidate tracks waiting to be downloaded into a mix).
+         *
+         * Schema mirrors the Room annotations on [TrackTagEntity],
+         * [LumaMixRecipeEntity], and [DiscoveryQueueEntity] — if those
+         * change, this migration + the schema JSON both need updating.
+         */
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // track_tags — composite PK (track_id, tag), FK cascade on track delete.
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS track_tags (
+                        track_id INTEGER NOT NULL,
+                        tag TEXT NOT NULL,
+                        weight REAL NOT NULL,
+                        source TEXT NOT NULL,
+                        fetched_at INTEGER NOT NULL,
+                        PRIMARY KEY (track_id, tag),
+                        FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_track_tags_tag ON track_tags(tag)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_track_tags_track_id ON track_tags(track_id)")
+
+                // stash_mix_recipes — the recipe table, FK to playlists set null on delete.
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS stash_mix_recipes (
+                        id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL,
+                        description TEXT,
+                        include_tags_csv TEXT NOT NULL DEFAULT '',
+                        exclude_tags_csv TEXT NOT NULL DEFAULT '',
+                        era_start_year INTEGER,
+                        era_end_year INTEGER,
+                        affinity_bias REAL NOT NULL DEFAULT 0,
+                        discovery_ratio REAL NOT NULL DEFAULT 0,
+                        freshness_window_days INTEGER NOT NULL DEFAULT 0,
+                        target_length INTEGER NOT NULL DEFAULT 50,
+                        is_builtin INTEGER NOT NULL DEFAULT 0,
+                        is_active INTEGER NOT NULL DEFAULT 1,
+                        playlist_id INTEGER,
+                        created_at INTEGER NOT NULL,
+                        last_refreshed_at INTEGER,
+                        FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE SET NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_stash_mix_recipes_playlist_id ON stash_mix_recipes(playlist_id)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_stash_mix_recipes_is_active ON stash_mix_recipes(is_active)")
+
+                // discovery_queue — FK to recipe cascades on delete.
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS discovery_queue (
+                        id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                        recipe_id INTEGER NOT NULL,
+                        artist TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        seed_artist TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'PENDING',
+                        track_id INTEGER,
+                        queued_at INTEGER NOT NULL,
+                        completed_at INTEGER,
+                        error_message TEXT,
+                        FOREIGN KEY (recipe_id) REFERENCES stash_mix_recipes(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_discovery_queue_status ON discovery_queue(status)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_discovery_queue_recipe_id ON discovery_queue(recipe_id)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_discovery_queue_queued_at ON discovery_queue(queued_at)")
+            }
+        }
+
+        /**
+         * v11 → v12: add `isrc` + `explicit` columns to both `tracks` and
+         * `remote_track_snapshots`. Both nullable because neither field is
+         * available for YouTube-sourced tracks. `isrc` holds Spotify's
+         * per-master unique identifier; `explicit` is the parental-advisory
+         * flag. The matcher uses them to distinguish clean vs. explicit
+         * masters and to pin a specific recording when an ISRC is known.
+         */
+        val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN isrc TEXT DEFAULT NULL")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN explicit INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE remote_track_snapshots ADD COLUMN isrc TEXT DEFAULT NULL")
+                db.execSQL("ALTER TABLE remote_track_snapshots ADD COLUMN explicit INTEGER DEFAULT NULL")
+            }
+        }
+
+        /**
+         * v12 → v13: add `date_added` to playlists. Drives the Library
+         * tab's "Recently added" sort order (issue #13 on GitHub). Unlike
+         * `last_synced` — which resets every sync run and caused
+         * playlists to reshuffle in the list — `date_added` is stable:
+         * set once when the playlist first enters the library.
+         *
+         * Existing rows are backfilled from `last_synced` when available
+         * (best approximation of "when the user first saw this playlist"
+         * for Spotify-imported mixes), otherwise from the migration's
+         * wall clock.
+         */
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE playlists ADD COLUMN date_added INTEGER NOT NULL DEFAULT 0")
+                // last_synced is an Instant stored as epoch-millis INTEGER;
+                // NULL when never synced. Use it as the best backfill
+                // proxy, fall back to the migration's wall clock in ms.
+                db.execSQL(
+                    """
+                    UPDATE playlists
+                    SET date_added = COALESCE(last_synced, strftime('%s','now') * 1000)
+                    WHERE date_added = 0
+                    """.trimIndent()
+                )
+            }
+        }
+
+        /**
+         * v14 — persists the per-track InnerTube `musicVideoType` (ATV /
+         * OMV / UGC / OFFICIAL_SOURCE_MUSIC / PODCAST_EPISODE) so the
+         * Fix-Wrong-Versions backfill can skip InnerTube verification
+         * calls on tracks it's already typed. Nullable — null means
+         * "never verified" and the worker will verify on next scan. The
+         * column is TEXT (the enum's .name), not an INTEGER code, so
+         * migrations reading the DB don't need to know the enum ordering.
+         */
+        val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN music_video_type TEXT")
+            }
+        }
+
+        /**
+         * v14 → v15: add YouTube history sync columns.
+         * `yt_scrobbled` on listening_events tracks whether a play event
+         * was already sent to YouTube Music history. `yt_canonical_video_id`
+         * on tracks holds the YouTube Music video ID for canonical matching.
+         */
+        val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE listening_events ADD COLUMN yt_scrobbled INTEGER NOT NULL DEFAULT 0"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_listening_events_yt_scrobbled " +
+                        "ON listening_events(yt_scrobbled)"
+                )
+                db.execSQL(
+                    "ALTER TABLE tracks ADD COLUMN yt_canonical_video_id TEXT"
+                )
+            }
+        }
+
+        /**
+         * v15 → v16: add `partial` + `expected_count` columns to
+         * remote_playlist_snapshots. Surfaces YouTube continuation-pagination
+         * partial results from the new [YTMusicApiClient] paged-result types.
+         */
+        val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE remote_playlist_snapshots ADD COLUMN partial INTEGER NOT NULL DEFAULT 0"
+                )
+                db.execSQL(
+                    "ALTER TABLE remote_playlist_snapshots ADD COLUMN expected_count INTEGER DEFAULT NULL"
+                )
+            }
+        }
+
+        /**
+         * v16 → v17: per-track audio quality metadata.
+         *
+         * Two new nullable columns surface the bit-depth + sample-rate
+         * read from each downloaded file — needed for the v0.9.11
+         * Library FLAC badge upgrade ("FLAC 24/96") and the Now Playing
+         * quality line ("FLAC · 24-bit/96.0 kHz · 4233 kbps").
+         *
+         * Both columns are nullable. NULL means "unknown": legacy rows
+         * pre-backfill, lossy codecs with no meaningful bit-depth, or
+         * files whose container won't expose the values via
+         * `MediaExtractor`/STREAMINFO. A v0.9.11 first-launch worker
+         * (`QualityInfoBackfillWorker`) sweeps lossless rows whose
+         * columns are still NULL.
+         */
+        val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN bits_per_sample INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN sample_rate_hz INTEGER DEFAULT NULL")
+            }
+        }
+
+        /**
+         * v17 → v18: add Like-state timestamps to tracks (spotify /
+         * ytmusic / LUMA) and `completed_at` to listening_events.
+         * All nullable INTEGER, default NULL — same shape as v0.9.11's
+         * MIGRATION_16_17 quality-info columns. v0.9.13 ships the
+         * heart button + auto-save scrobbler that populate these.
+         */
+        val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN spotify_saved_at INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN ytmusic_saved_at INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN stash_liked_at INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE listening_events ADD COLUMN completed_at INTEGER DEFAULT NULL")
+            }
+        }
+
+        /**
+         * v18 -> v19: introduce identity-keyed `track_blocklist` table and
+         * seed it from existing `tracks.is_blacklisted = 1` rows. The
+         * `is_blacklisted` column is NOT yet dropped (column drop happens
+         * in v19->v20 once all read paths have been removed in Phase 3) —
+         * this migration is purely additive to keep rollback-on-failure safe.
+         *
+         * v18 schema confirmed via core/data/schemas/.../18.json:
+         *   - canonical_artist TEXT NOT NULL
+         *   - canonical_title  TEXT NOT NULL
+         *   - spotify_uri      TEXT (nullable)
+         *   - youtube_id       TEXT (nullable)
+         *   - date_added       INTEGER NOT NULL
+         *   - is_blacklisted   INTEGER NOT NULL DEFAULT 0
+         *
+         * The seed query uses raw SQL string concat over canonical_artist +
+         * canonical_title to derive the blocklist key. The runtime path uses
+         * BlocklistKey.fromStoredCanonicals() which produces an identical
+         * shape, ensuring the integrity worker can match these rows later.
+         */
+        val MIGRATION_18_19 = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS track_blocklist (
+                        canonical_key TEXT NOT NULL PRIMARY KEY,
+                        artist        TEXT NOT NULL,
+                        title         TEXT NOT NULL,
+                        spotify_uri   TEXT,
+                        youtube_id    TEXT,
+                        blocked_at    INTEGER NOT NULL,
+                        blocked_from  TEXT NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_track_blocklist_spotify_uri ON track_blocklist(spotify_uri)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_track_blocklist_youtube_id ON track_blocklist(youtube_id)"
+                )
+
+                db.execSQL(
+                    """
+                    INSERT OR IGNORE INTO track_blocklist
+                        (canonical_key, artist, title, spotify_uri, youtube_id, blocked_at, blocked_from)
+                    SELECT
+                        canonical_artist || '|' || canonical_title AS canonical_key,
+                        artist,
+                        title,
+                        spotify_uri,
+                        youtube_id,
+                        CASE WHEN date_added > 0 THEN date_added ELSE strftime('%s','now') * 1000 END,
+                        'MIGRATION_V19'
+                    FROM tracks
+                    WHERE is_blacklisted = 1
+                    """.trimIndent()
+                )
+            }
+        }
+
+        /**
+         * v19 -> v20: drop the now-unused `is_blacklisted` column from
+         * tracks. The source of truth moved to `track_blocklist` in v19;
+         * after Phase 2 wired the chokepoints and Phase 3 made
+         * `BlocklistGuard.block` hard-delete the tracks row, no Kotlin
+         * code reads or writes the flag anymore.
+         *
+         * SQLite's column drop only landed in 3.35 (Android 12+ / API 31)
+         * and Room's schema validator wants exact DDL, so we use the
+         * recreate-table dance. The CREATE TABLE statement below is the
+         * verbatim createSql from core/data/schemas/.../20.json — DO NOT
+         * hand-edit. Likewise the index list below mirrors 20.json's
+         * indices array exactly.
+         */
+        val MIGRATION_19_20 = object : Migration(19, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Defensively disable FK enforcement during the dance
+                // (no FK targets `tracks.id` directly today, but the
+                // pragma is cheap insurance against a future FK addition
+                // running during the recreate).
+                db.execSQL("PRAGMA foreign_keys=OFF")
+
+                db.execSQL("ALTER TABLE tracks RENAME TO tracks_v19")
+
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `tracks` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`title` TEXT NOT NULL, " +
+                        "`artist` TEXT NOT NULL, " +
+                        "`album` TEXT NOT NULL, " +
+                        "`duration_ms` INTEGER NOT NULL, " +
+                        "`file_path` TEXT, " +
+                        "`file_format` TEXT NOT NULL, " +
+                        "`quality_kbps` INTEGER NOT NULL, " +
+                        "`file_size_bytes` INTEGER NOT NULL, " +
+                        "`source` TEXT NOT NULL, " +
+                        "`spotify_uri` TEXT, " +
+                        "`youtube_id` TEXT, " +
+                        "`album_art_url` TEXT, " +
+                        "`album_art_path` TEXT, " +
+                        "`date_added` INTEGER NOT NULL, " +
+                        "`last_played` INTEGER, " +
+                        "`play_count` INTEGER NOT NULL, " +
+                        "`is_downloaded` INTEGER NOT NULL, " +
+                        "`canonical_title` TEXT NOT NULL, " +
+                        "`canonical_artist` TEXT NOT NULL, " +
+                        "`match_confidence` REAL NOT NULL, " +
+                        "`match_dismissed` INTEGER NOT NULL, " +
+                        "`match_flagged` INTEGER NOT NULL DEFAULT 0, " +
+                        "`isrc` TEXT, " +
+                        "`explicit` INTEGER, " +
+                        "`music_video_type` TEXT, " +
+                        "`yt_canonical_video_id` TEXT, " +
+                        "`bits_per_sample` INTEGER, " +
+                        "`sample_rate_hz` INTEGER, " +
+                        "`spotify_saved_at` INTEGER, " +
+                        "`ytmusic_saved_at` INTEGER, " +
+                        "`stash_liked_at` INTEGER" +
+                        ")"
+                )
+
+                // Copy every column EXCEPT is_blacklisted. Enumerated
+                // explicitly to avoid SELECT * pulling the dropped column.
+                db.execSQL(
+                    """
+                    INSERT INTO tracks (
+                        id, title, artist, album, duration_ms, file_path, file_format,
+                        quality_kbps, file_size_bytes, source, spotify_uri, youtube_id,
+                        album_art_url, album_art_path, date_added, last_played, play_count,
+                        is_downloaded, canonical_title, canonical_artist, match_confidence,
+                        match_dismissed, match_flagged, isrc, explicit, music_video_type,
+                        yt_canonical_video_id, bits_per_sample, sample_rate_hz,
+                        spotify_saved_at, ytmusic_saved_at, stash_liked_at
+                    )
+                    SELECT
+                        id, title, artist, album, duration_ms, file_path, file_format,
+                        quality_kbps, file_size_bytes, source, spotify_uri, youtube_id,
+                        album_art_url, album_art_path, date_added, last_played, play_count,
+                        is_downloaded, canonical_title, canonical_artist, match_confidence,
+                        match_dismissed, match_flagged, isrc, explicit, music_video_type,
+                        yt_canonical_video_id, bits_per_sample, sample_rate_hz,
+                        spotify_saved_at, ytmusic_saved_at, stash_liked_at
+                    FROM tracks_v19
+                    """.trimIndent()
+                )
+
+                db.execSQL("DROP TABLE tracks_v19")
+
+                // Re-create every index from 20.json#indices. Names must
+                // match exactly or runMigrationsAndValidate will fail.
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_tracks_spotify_uri` ON `tracks` (`spotify_uri`)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_tracks_youtube_id` ON `tracks` (`youtube_id`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_tracks_artist` ON `tracks` (`artist`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_tracks_album` ON `tracks` (`album`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_tracks_date_added` ON `tracks` (`date_added`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_tracks_last_played` ON `tracks` (`last_played`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_tracks_play_count` ON `tracks` (`play_count`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_tracks_title_artist` ON `tracks` (`title`, `artist`)")
+
+                db.execSQL("PRAGMA foreign_keys=ON")
+            }
+        }
+
+        /**
+         * v20 -> v21: Discover Mix tuning (v0.9.16).
+         *
+         * Purely additive — no recreate-table dance:
+         * 1. Four new track columns for Last.fm enrichment (mbid,
+         *    lastfm_user_playcount, lastfm_listeners, lastfm_user_loved).
+         *    Populated by TrackInfoEnrichmentWorker; nullable so
+         *    pre-enrichment rows stay valid.
+         * 2. seed_strategy on stash_mix_recipes — selects the
+         *    discovery seed source (ARTIST_SIMILAR / TAG_GRAPH /
+         *    TRACK_SIMILAR / NONE). Defaults to ARTIST_SIMILAR which
+         *    matches pre-v0.9.16 behavior so existing recipes are
+         *    behavior-preserving.
+         * 3. New track_skip_events table — captures skip events
+         *    separately from listening_events to preserve the
+         *    "every listening_event is a real listen" invariant
+         *    that the auto-save scrobbler depends on.
+         */
+        val MIGRATION_20_21 = object : Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. Track-level columns for Last.fm enrichment.
+                db.execSQL("ALTER TABLE tracks ADD COLUMN mbid TEXT DEFAULT NULL")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN lastfm_user_playcount INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN lastfm_listeners INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN lastfm_user_loved INTEGER NOT NULL DEFAULT 0")
+
+                // 2. seed_strategy on stash_mix_recipes.
+                db.execSQL(
+                    "ALTER TABLE stash_mix_recipes ADD COLUMN seed_strategy TEXT NOT NULL DEFAULT 'ARTIST_SIMILAR'"
+                )
+
+                // 3. New track_skip_events table.
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS track_skip_events (
+                        id          INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        track_id    INTEGER NOT NULL,
+                        skipped_at  INTEGER NOT NULL,
+                        position_ms INTEGER NOT NULL,
+                        FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_track_skip_events_track_id ON track_skip_events(track_id)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_track_skip_events_skipped_at ON track_skip_events(skipped_at)")
+            }
+        }
+
+        /**
+         * v21 -> v22 (v0.9.17): introduces DownloadStatus.WAITING_FOR_LOSSLESS.
+         *
+         * The `download_queue.status` column is TEXT storing the enum
+         * `.name`, so the new value parses without an ALTER TABLE — no
+         * DDL change is required. This migration is intentionally a
+         * no-op on disk; its only job is to advance the schema version
+         * so Room is happy that the new enum vocabulary is "expected".
+         */
+        val MIGRATION_21_22 = object : Migration(21, 22) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // No-op DDL: TEXT columns accept new enum names natively.
+            }
+        }
+
+        /**
+         * v0.9.23 — track which playlist_tracks rows were added by the user
+         * (vs. by a sync run). Drives REFRESH-mode survival so a user's
+         * manual additions to an imported Spotify/YT Music playlist persist
+         * across re-syncs. See issue #42.
+         *
+         * Default 0 (FALSE) on existing rows is correct: every pre-fix row
+         * was either sync-added (CUSTOM playlists never go through REFRESH
+         * so the flag is moot for them) or added via the existing
+         * MusicRepositoryImpl.addTrackToPlaylist path which only targeted
+         * CUSTOM playlists — those don't hit clearPlaylistTracks anyway.
+         */
+        val MIGRATION_22_23 = object : Migration(22, 23) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE playlist_tracks " +
+                        "ADD COLUMN locally_added INTEGER NOT NULL DEFAULT 0",
+                )
+            }
+        }
+
+        /**
+         * v23 → v24: per-track loudness metadata for BS.1770 normalization.
+         *
+         * Three nullable columns: `loudness_lufs` (integrated LUFS, null = not
+         * measured, NaN = measurement attempted-and-failed sentinel),
+         * `true_peak_dbfs` (sample-peak in dBFS, negative),
+         * `loudness_measured_at` (epoch-ms timestamp of the measurement
+         * attempt; usable for stale-measurement detection if the algorithm
+         * ever changes and for the weekly NaN-resurrection query).
+         */
+        val MIGRATION_23_24 = object : Migration(23, 24) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN loudness_lufs REAL")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN true_peak_dbfs REAL")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN loudness_measured_at INTEGER")
+            }
+        }
+
+        /**
+         * v24 → v25: per-track `album_artist` so the Library Albums query
+         * can group by (album, album_artist) instead of album alone. Without
+         * this, two distinct albums with the same title — e.g. "Singles" by
+         * Usher and "Singles" by Drake — collide into one card with mixed
+         * track lists and bleeding cover art. Multi-artist collab albums
+         * (Drake & 21 Savage's "Her Loss") still group cleanly because all
+         * tracks share the same album_artist string even though per-track
+         * artist credits vary.
+         *
+         * NOT NULL default '' so existing rows survive the ALTER. The
+         * v0.9.26 startup backfill in [com.luma.app.LumaApplication]
+         * fills the column from the file's path-encoded artist folder.
+         */
+        val MIGRATION_24_25 = object : Migration(24, 25) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN album_artist TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        /**
+         * v25 → v26: per-track streamability metadata.
+         *
+         * `is_streamable` is the cached result of an `AvailabilityCheckWorker`
+         * lookup against Kennyy's Qobuz proxy. `is_streamable_checked_at` is the
+         * timestamp of that lookup (NULL = never checked, so the worker can drain
+         * the un-checked rows on first run).
+         *
+         * Both columns are additive; existing rows survive untouched with their
+         * default values, and the `AvailabilityCheckWorker` fills them in over
+         * the next few minutes after first launch on v0.9.27.
+         */
+        val MIGRATION_25_26 = object : Migration(25, 26) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN is_streamable INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN is_streamable_checked_at INTEGER")
+            }
+        }
+
+        /**
+         * v26 → v27 (v0.9.35): per-track `metadata_embedded_at` for the
+         * tag + art embedding backfill. Nullable INTEGER, no default —
+         * NULL is the "needs tagging" sentinel; a non-null non-zero
+         * value is the success stamp; 0L is the irrecoverable-failure
+         * stamp (file missing, ffmpeg error, SAF row). The
+         * MetadataBackfillWorker queries `metadata_embedded_at IS NULL`
+         * so both success and failure stamps terminate the work item.
+         */
+        val MIGRATION_26_27 = object : Migration(26, 27) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN metadata_embedded_at INTEGER")
+            }
+        }
+
+        /**
+         * v27 → v28 (v0.9.36): per-track `lyrics_fetched_at` for the
+         * lyrics-fetch backfill (mirror of v0.9.35's
+         * `metadata_embedded_at` sentinel semantics) plus the new
+         * `lyrics` table that stores the fetched payload keyed by
+         * track id with FK cascade on delete.
+         *
+         * Sentinel semantics on `tracks.lyrics_fetched_at`: NULL =
+         * never tried; 0L = a fetch tried and produced no hit (LRCLIB
+         * miss + YT-Music fallback miss); non-null non-zero = success
+         * epoch-millis (a `lyrics` row exists for this track). NULL means
+         * the on-open priority fetch (or a re-download) may still retry.
+         */
+        val MIGRATION_27_28 = object : Migration(27, 28) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN lyrics_fetched_at INTEGER")
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS lyrics (
+                      track_id INTEGER NOT NULL PRIMARY KEY,
+                      plain_text TEXT,
+                      synced_lrc TEXT,
+                      instrumental INTEGER NOT NULL DEFAULT 0,
+                      language TEXT,
+                      source TEXT NOT NULL,
+                      source_lyrics_id TEXT,
+                      fetched_at INTEGER NOT NULL,
+                      FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE
+                    )
+                """.trimIndent())
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_lyrics_track_id ON lyrics(track_id)")
+            }
+        }
+
+        /**
+         * v28 → v29 (v0.9.38 / library-health-phase1): rewrite every
+         * legacy `download_queue.failure_type = 'DOWNLOAD_ERROR'` row
+         * to `'UNKNOWN'`.
+         *
+         * Phase 1 of the library-health epic deletes the `DOWNLOAD_ERROR`
+         * constant from [com.luma.core.model.download.DownloadFailureType]
+         * in favour of a richer failure-type vocabulary
+         * (UNKNOWN + classifier-emitted variants). Without this migration
+         * the converter's `valueOf(it)` call in
+         * [com.luma.core.data.db.converter.Converters.fromFailureType]
+         * would crash with `IllegalArgumentException` the first time Room
+         * read a legacy `'DOWNLOAD_ERROR'` row. Room guarantees migrations
+         * run before any DAO read on the upgraded schema, so once this
+         * migration ships the converter only ever sees valid enum names.
+         *
+         * UPDATE-in-place is safe because `failure_type` is a TEXT column
+         * (storing the enum `.name`), so swapping one literal for another
+         * needs no DDL.
+         */
+        val MIGRATION_28_29 = object : Migration(28, 29) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "UPDATE download_queue SET failure_type = 'UNKNOWN' WHERE failure_type = 'DOWNLOAD_ERROR'"
+                )
+            }
+        }
+
+        val MIGRATION_29_30 = object : Migration(29, 30) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE stash_mix_recipes ADD COLUMN mood_keys_csv TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE stash_mix_recipes ADD COLUMN tag_sample_depth INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /** v30 → v31: add lastfm_response_cache for generic Last.fm lookups. */
+        val MIGRATION_30_31 = object : Migration(30, 31) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS lastfm_response_cache (
+                        cache_key TEXT NOT NULL PRIMARY KEY,
+                        json TEXT NOT NULL,
+                        fetched_at INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
+        /**
+         * v31 → v32: add the `spotify_resolution` side-table that caches the
+         * outcome of resolving a local track to a Spotify URI (positive /
+         * negative / transient), so the antra Spotify-URI resolver doesn't
+         * re-search Spotify on every play. Purely additive — keyed by trackId.
+         */
+        val MIGRATION_31_32 = object : Migration(31, 32) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS spotify_resolution (
+                        trackId INTEGER NOT NULL PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        spotifyUri TEXT,
+                        matchedIsrc TEXT,
+                        titleSim REAL,
+                        durDeltaSec INTEGER,
+                        resolvedAtMs INTEGER NOT NULL,
+                        expiresAtMs INTEGER NOT NULL,
+                        attempts INTEGER NOT NULL DEFAULT 1
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
+        /**
+         * v32 → v33: add nullable `streaming_mode` to sync_history so each
+         * receipt can show whether the run streamed (Online) or downloaded
+         * (Offline). NULL on pre-migration rows — the UI suppresses the
+         * label for those since their mode is unknown.
+         */
+        val MIGRATION_32_33 = object : Migration(32, 33) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE sync_history ADD COLUMN streaming_mode INTEGER DEFAULT NULL")
+            }
+        }
+
+        /**
+         * v33 → v34: add `hide_from_home` to playlists so surfaced/synced
+         * mixes can be suppressed from the Home rails without disabling sync
+         * or deleting them. NOT NULL DEFAULT 0 — existing rows stay visible.
+         */
+        val MIGRATION_33_34 = object : Migration(33, 34) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE playlists ADD COLUMN hide_from_home INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /**
+         * v34 → v35: add the flac_upgrade_queue worklist table for the batch
+         * "Upgrade to FLAC" worker (spec 2026-07-22 §3). Purely additive.
+         */
+        val MIGRATION_34_35 = object : Migration(34, 35) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `flac_upgrade_queue` (
+                        `track_id` INTEGER NOT NULL,
+                        `status` TEXT NOT NULL,
+                        `enqueued_at` INTEGER NOT NULL,
+                        PRIMARY KEY(`track_id`),
+                        FOREIGN KEY(`track_id`) REFERENCES `tracks`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_flac_upgrade_queue_status` ON `flac_upgrade_queue` (`status`)"
+                )
+            }
+        }
+
+        /**
+         * v35 → v36: add `pinned` to playlists so users can pin favorite
+         * playlists to the top of the Library Playlists grid. NOT NULL
+         * DEFAULT 0 — existing rows stay unpinned.
+         */
+        val MIGRATION_35_36 = object : Migration(35, 36) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE playlists ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /**
+         * v36 → v37: add `listen_submissions`, per-destination scrobble state.
+         *
+         * Replaces the pattern where each new scrobble destination took its own
+         * boolean column plus its own DAO triplet — `scrobbled` for Last.fm, then
+         * `yt_scrobbled` for YouTube history. ListenBrainz would have been the
+         * third of each; now a destination is a `target` string and needs no
+         * schema change.
+         *
+         * Purely additive. The existing columns are untouched and Last.fm /
+         * YouTube history keep using them, so this migration cannot disturb
+         * scrobbling that already works. Moving those two onto this table is a
+         * separate change, made after the new path has proven itself.
+         */
+        /**
+         * v37 → v38: add `tracks.lastfm_loved_at` so Last.fm joins Spotify and
+         * YouTube as a like-mirror destination.
+         *
+         * Not just deduplication: `track.unlove` destroys data LUMA does not own.
+         * A user may have loved a track on Last.fm long before installing LUMA,
+         * and un-hearting it here must not silently delete that. Only a love this
+         * column records — one LUMA created — is ever un-loved.
+         */
+        val MIGRATION_37_38 = object : Migration(37, 38) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN lastfm_loved_at INTEGER DEFAULT NULL")
+            }
+        }
+
+        /**
+         * Restore points for "Undo last sync" — a copy of playlist visibility and
+         * playlist membership taken before each sync's diff.
+         *
+         * NO foreign keys on these tables, deliberately: a backup must survive the
+         * very deletions it exists to reverse, and `playlist_tracks` cascades from
+         * both `playlists` and `tracks`. Referential integrity is re-checked at
+         * restore time instead (see SyncUndoDao.restoreMemberships).
+         */
+        /**
+         * One-time cleanup of editorial playlists that were misclassified as
+         * personalized "mixes".
+         *
+         * `isSpotifyMix` used to end in `ownerId == "spotify"`, which cannot tell
+         * a Made-For-You mix from an editorial playlist — both are spotify-owned.
+         * On a real account that swept in 66 editorial playlists ("Disco Fever",
+         * "70s Rock Anthems", "This Is <artist>") out of 130 counted mixes, which
+         * is why the Sync tab's mix count bore no relation to what Home showed.
+         * The classifier now rejects the editorial id prefix, but rows already
+         * written stay forever — nothing prunes Spotify DAILY_MIX rows.
+         *
+         * SOFT-hide (`is_active = 0`), never a delete: these are reversible in
+         * exactly the way [PlaylistDao.reactivateById] intends, downloaded files
+         * and track rows are untouched, and a user who actually wants one back
+         * loses nothing. Scoped to DAILY_MIX so a playlist the user genuinely
+         * SAVED (which syncs as CUSTOM) is never in range.
+         */
+        val MIGRATION_39_40 = object : Migration(39, 40) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    UPDATE playlists SET is_active = 0
+                    WHERE source = 'SPOTIFY'
+                      AND type = 'DAILY_MIX'
+                      AND is_active = 1
+                      AND source_id LIKE '37i9dQZF1D%'
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        /**
+         * v41 → v42: `playlists` gains nullable `pinned_to_home_at`
+         * (epoch-millis the user put the playlist on Home's "Your
+         * playlists" rail). NULL = not on Home, so every existing row
+         * stays off the rail until the user pins it.
+         */
+        val MIGRATION_41_42 = object : Migration(41, 42) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE playlists ADD COLUMN pinned_to_home_at INTEGER")
+            }
+        }
+
+        /**
+         * v42 → v43: every stored YouTube thumbnail that `ArtUrlUpgrader` had
+         * rewritten to `sddefault.jpg` becomes `hqdefault.jpg`, on track art and
+         * on playlist covers (which are built from track art, `|`-joined for
+         * the mosaics). YouTube only generates `sddefault` for some videos —
+         * 1 in 12 rows of a real library 404'd when probed on 2026-09-05 —
+         * and the loaders draw nothing for a 404: black art at random, on Now
+         * Playing, the media notification and every cover. `hqdefault` exists
+         * for every video. Other filenames, other hosts and NULLs are untouched;
+         * the upgrader writes `hqdefault` from now on. Data-only: the schema at
+         * 43 is identical to 42.
+         */
+        /**
+         * v43 -> v44: every stored Last.fm cover is the 300x300 PNG the API
+         * advertises. The same hash is served 770 wide, and as a JPEG that is
+         * LIGHTER than the 300px PNG (probed over 200 covers of a real library
+         * on 2026-09-09: 152 KB -> 91 KB median, for 2.5x the pixels). The
+         * upgrader now rewrites them at the parse site, but only for art
+         * fetched from here on; a library that already streams thousands of
+         * Last.fm-matched tracks would stay soft until each row happened to be
+         * re-fetched. This repairs them in place.
+         *
+         * Blanket-replacing `.png` is scoped by the Last.fm marker in the
+         * WHERE, and is safe for the pipe-joined playlist mosaics too: every
+         * other art host in the app is extensionless (Spotify, YT Music) or
+         * serves .jpg/.webp (ytimg, Qobuz). Verified across 19k tracks and
+         * every playlist of a real library — zero non-Last.fm `.png` art URLs.
+         *
+         * A hash missing the 770 JPEG is caught at fetch time by
+         * `LastFmArtFallbackInterceptor`, which walks back down to the PNG and
+         * then to this exact 300x300 URL, so no row can render worse than it
+         * did before this migration.
+         */
+        /**
+         * v44 -> v45: every stored YouTube thumbnail becomes `maxresdefault`.
+         *
+         * `hqdefault` (480x360) is not merely small, it is the wrong shape:
+         * YouTube pads the 16:9 frame into 4:3, which measured on a real
+         * thumbnail is 45 black rows top and bottom — 24% of the square this
+         * app crops to. `maxresdefault` is a clean 1280x720 with no bars, and
+         * it is never a stock placeholder (150 covers probed 2026-09-10: every
+         * hit a real 1280x720 frame, 24 KB at the smallest, no repeats).
+         *
+         * It is present for 82% of a library's videos and `sddefault` for 89%,
+         * which is exactly why MIGRATION_42_43 once forced everything DOWN to
+         * `hqdefault` — a 404 draws nothing. `ArtFallbackInterceptor` now walks
+         * a miss back down to `sddefault` and then `hqdefault`, so aiming high
+         * costs a redirect on the unlucky ones instead of a black tile.
+         *
+         * Replacing the variant name is safe on the pipe-joined playlist
+         * mosaics: the token only appears in i.ytimg.com paths, and the WHERE
+         * scopes each UPDATE to rows that contain one.
+         */
+        /**
+         * v45 -> v46: remember downloads the device lost, and let the user ask
+         * for them back.
+         *
+         * Restoring a backup onto a fresh install hands back the whole library
+         * with none of the audio, so the integrity sweep resets every
+         * downloaded row. Getting the music back then depended on the
+         * automatic requeue, which only takes tracks inside a sync-enabled,
+         * non-mix playlist — measured on a real 861-track library, that was
+         * 36 of them. The rest sat there known and unreachable.
+         *
+         * `tracks.download_missing_at` records "this was downloaded and the
+         * file is gone", set by the sweep and cleared the moment the track is
+         * downloaded again. A deliberate delete clears it too, so it never
+         * means "discarded". `download_queue.user_requested` marks a row the
+         * user asked for by hand; the pickup queries accept it in place of the
+         * playlist membership an automatic requeue still requires.
+         *
+         * Existing rows start unstamped: nothing recorded what was lost before
+         * this migration, and inventing it would offer downloads the user may
+         * have deleted on purpose.
+         */
+        val MIGRATION_45_46 = object : Migration(45, 46) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN download_missing_at INTEGER")
+                db.execSQL(
+                    "ALTER TABLE download_queue ADD COLUMN user_requested INTEGER NOT NULL DEFAULT 0",
+                )
+            }
+        }
+
+        val MIGRATION_44_45 = object : Migration(44, 45) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                for (variant in listOf("default", "mqdefault", "hqdefault", "sddefault")) {
+                    db.execSQL(
+                        "UPDATE tracks SET album_art_url = " +
+                            "REPLACE(album_art_url, '/$variant.', '/maxresdefault.') " +
+                            "WHERE album_art_url LIKE '%i.ytimg.com/%/$variant.%'",
+                    )
+                    db.execSQL(
+                        "UPDATE playlists SET art_url = " +
+                            "REPLACE(art_url, '/$variant.', '/maxresdefault.') " +
+                            "WHERE art_url LIKE '%i.ytimg.com/%/$variant.%'",
+                    )
+                }
+            }
+        }
+
+        val MIGRATION_43_44 = object : Migration(43, 44) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "UPDATE tracks SET album_art_url = " +
+                        "REPLACE(REPLACE(album_art_url, '/i/u/300x300/', '/i/u/770x0/'), '.png', '.jpg') " +
+                        "WHERE album_art_url LIKE '%freetls.fastly.net/i/u/300x300/%'",
+                )
+                db.execSQL(
+                    "UPDATE playlists SET art_url = " +
+                        "REPLACE(REPLACE(art_url, '/i/u/300x300/', '/i/u/770x0/'), '.png', '.jpg') " +
+                        "WHERE art_url LIKE '%freetls.fastly.net/i/u/300x300/%'",
+                )
+            }
+        }
+
+        val MIGRATION_42_43 = object : Migration(42, 43) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "UPDATE tracks SET album_art_url = REPLACE(album_art_url, '/sddefault.', '/hqdefault.') " +
+                        "WHERE album_art_url LIKE 'https://i.ytimg.com/%/sddefault.%'",
+                )
+                db.execSQL(
+                    "UPDATE playlists SET art_url = REPLACE(art_url, '/sddefault.', '/hqdefault.') " +
+                        "WHERE art_url LIKE '%i.ytimg.com/%/sddefault.%'",
+                )
+            }
+        }
+
+        /**
+         * v46 -> v47: `artist_images` cache table for the Library Artists tab.
+         *
+         * `ArtistImageBackfillWorker` resolves each displayed artist's official
+         * photo via the YT Music artists search and stores it here, keyed by
+         * the primary artist name ([ArtistImageEntity]). A row with a NULL
+         * `image_url` and a non-NULL `attempted_at` is a permanent
+         * "unresolvable" sentinel so the worker never re-polls local-only rips.
+         *
+         * The primary key is COLLATE NOCASE so a case-variant credit collapses
+         * onto the same row (one photo per artist, not one per spelling).
+         */
+        val MIGRATION_46_47 = object : Migration(46, 47) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `artist_images` (
+                        `artist_name` TEXT NOT NULL COLLATE NOCASE,
+                        `image_url` TEXT,
+                        `attempted_at` INTEGER NOT NULL,
+                        PRIMARY KEY(`artist_name`)
+                    )
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        /**
+         * v47 -> v48: shared mixes (spec docs/superpowers/specs/2026-09-23-shared-mixes-design.md §5).
+         * One row per playlist that this phone shares (OWNER) or follows (FOLLOWER). Additive.
+         */
+        val MIGRATION_47_48 = object : Migration(47, 48) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `shared_mixes` (
+                        `playlist_id` INTEGER NOT NULL,
+                        `share_id` TEXT NOT NULL,
+                        `role` TEXT NOT NULL,
+                        `edit_key` TEXT,
+                        `name` TEXT NOT NULL,
+                        `version` INTEGER NOT NULL,
+                        `content_hash` TEXT NOT NULL,
+                        `auto_update` INTEGER NOT NULL,
+                        `status` TEXT NOT NULL,
+                        `shared_by` TEXT,
+                        `missing_count` INTEGER NOT NULL,
+                        `notice_pending` INTEGER NOT NULL,
+                        `last_checked_at` INTEGER,
+                        PRIMARY KEY(`playlist_id`),
+                        FOREIGN KEY(`playlist_id`) REFERENCES `playlists`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_shared_mixes_share_id` ON `shared_mixes` (`share_id`)")
+            }
+        }
+
+        /**
+         * v40 → v41: un-stamp every loudness measurement that stored the
+         * ebur128 gating floor (-70.0 LUFS).
+         *
+         * LoudnessMeasurer's parser used to first-match `I: ... LUFS` across
+         * the WHOLE ffmpeg stderr, and ebur128 prints a progress line per
+         * 100ms of audio above the Summary whose first frames always read
+         * `I: -70.0 LUFS` — so every track ever measured on device stored
+         * exactly -70.0 (true peaks were correct: `Peak:` only occurs in the
+         * Summary). 857 of 857 measured rows on the reference device.
+         *
+         * The parser is fixed alongside this migration; this clears the
+         * poisoned rows back to "never measured" (`loudness_measured_at`
+         * NULL) so `LoudnessBackfillWorker`'s `tracksNeedingLoudness` query
+         * picks them up on the charger. Rows with NULL lufs but a non-NULL
+         * stamp are deliberate failure sentinels for broken files — left
+         * alone. No real master integrates at or below -69.9 LUFS, so the
+         * threshold cannot claw back a legitimate measurement.
+         */
+        val MIGRATION_40_41 = object : Migration(40, 41) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    UPDATE tracks
+                    SET loudness_lufs = NULL,
+                        true_peak_dbfs = NULL,
+                        loudness_measured_at = NULL
+                    WHERE loudness_lufs IS NOT NULL
+                      AND loudness_lufs <= -69.9
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        val MIGRATION_38_39 = object : Migration(38, 39) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `sync_undo_points` (
+                        `sync_id` INTEGER NOT NULL,
+                        `created_at` INTEGER NOT NULL,
+                        `playlist_count` INTEGER NOT NULL,
+                        `membership_count` INTEGER NOT NULL,
+                        PRIMARY KEY(`sync_id`)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `sync_undo_playlists` (
+                        `sync_id` INTEGER NOT NULL,
+                        `playlist_id` INTEGER NOT NULL,
+                        `is_active` INTEGER NOT NULL,
+                        `sync_enabled` INTEGER NOT NULL,
+                        PRIMARY KEY(`sync_id`, `playlist_id`)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `sync_undo_memberships` (
+                        `sync_id` INTEGER NOT NULL,
+                        `playlist_id` INTEGER NOT NULL,
+                        `track_id` INTEGER NOT NULL,
+                        `position` INTEGER NOT NULL,
+                        `added_at` INTEGER,
+                        `removed_at` INTEGER,
+                        `locally_added` INTEGER NOT NULL,
+                        PRIMARY KEY(`sync_id`, `playlist_id`, `track_id`)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_sync_undo_memberships_sync_id` " +
+                        "ON `sync_undo_memberships` (`sync_id`)",
+                )
+            }
+        }
+
+        val MIGRATION_36_37 = object : Migration(36, 37) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `listen_submissions` (
+                        `event_id` INTEGER NOT NULL,
+                        `target` TEXT NOT NULL,
+                        `state` TEXT NOT NULL,
+                        `attempts` INTEGER NOT NULL,
+                        `updated_at` INTEGER NOT NULL,
+                        PRIMARY KEY(`event_id`, `target`),
+                        FOREIGN KEY(`event_id`) REFERENCES `listening_events`(`id`)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_listen_submissions_target_state` " +
+                        "ON `listen_submissions` (`target`, `state`)",
+                )
+            }
+        }
+
+        /**
+         * v48 -> v49: word-synced lyrics. `lyrics.ttml` is the raw Apple-style TTML (source of
+         * truth for the syllable renderer; `synced_lrc` is derived from it so every LRC consumer
+         * keeps working). `ttml_checked_at` is the upgrade backfill's "asked, Apple has nothing"
+         * stamp: NULL = never tried, so the worker terminates instead of re-polling misses.
+         * Purely additive.
+         */
+        val MIGRATION_48_49 = object : Migration(48, 49) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE lyrics ADD COLUMN ttml TEXT")
+                db.execSQL("ALTER TABLE lyrics ADD COLUMN ttml_checked_at INTEGER")
+            }
+        }
+
+        /**
+         * v49 -> v50: per-track lyrics sync offset (`lyrics.sync_offset_ms`, signed milliseconds,
+         * default 0). Positive delays lyrics, negative shows them earlier. Purely additive.
+         */
+        val MIGRATION_49_50 = object : Migration(49, 50) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE lyrics ADD COLUMN sync_offset_ms INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /**
+         * v50 -> v51: `playlists.keep_offline`, the playlist page's Download switch (#474).
+         * Default 0, so nothing starts downloading on upgrade.
+         *
+         * Also clears every mix's sync switch, ONCE. Older releases auto-enabled
+         * mixes (#368), so #438 cleared DAILY_MIX sync_enabled on every cold start.
+         * Since a44d8c99 that switch is real download consent in Download mode, and
+         * the every-launch reset wiped it. A stale flag can only come from an older
+         * database, and an old backup passes through this migration when it opens,
+         * so clearing here covers the case #438 was guarding.
+         *
+         * And drops LUMA Mixes' own download rows that never started, ONCE. From
+         * v0.9.20 until v0.9.37 (2026-05-25) LUMA Mixes queued their discoveries
+         * for download; for people who later turned LUMA Mixes off, only a
+         * cold-start cancel of the download worker held those back, and #474
+         * removed it. Here, not at startup, so a restored old backup is cleaned
+         * too. Narrow on purpose: a single-song tap or "download this playlist"
+         * filed the same row shape until 2026-06-29, so only a track discovery
+         * brought in counts, and a followed mix with "Download this mix" on keeps
+         * its songs (keep_offline, the other download switch, is 0 for everything
+         * right after the ALTER above).
+         */
+        val MIGRATION_50_51 = object : Migration(50, 51) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE playlists ADD COLUMN keep_offline INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE playlists SET sync_enabled = 0 WHERE type = 'DAILY_MIX'")
+                db.execSQL(
+                    """
+                    DELETE FROM download_queue
+                    WHERE sync_id IS NULL
+                      AND user_requested = 0
+                      AND status IN ('PENDING', 'FAILED', 'WAITING_FOR_LOSSLESS')
+                      AND created_at < 1779753600000
+                      AND track_id IN (SELECT track_id FROM discovery_queue WHERE track_id IS NOT NULL)
+                      AND track_id NOT IN (
+                          SELECT pt.track_id FROM playlist_tracks pt
+                          INNER JOIN playlists p ON p.id = pt.playlist_id
+                          WHERE pt.removed_at IS NULL
+                            AND p.is_active = 1
+                            AND p.sync_enabled = 1
+                            AND p.source_id LIKE 'share:%'
+                      )
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        /**
+         * v51 -> v52: `tracks.match_picked_at`, set when the user picks a
+         * track's audio in Failed Matches (#531). NULL on every existing row.
+         */
+        val MIGRATION_51_52 = object : Migration(51, 52) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN match_picked_at INTEGER")
+            }
+        }
+
+        /**
+        * v52 → v53: adds `tracks.flac_no_match_at`, the last time a FLAC-upgrade lookup
+        * found no lossless match for the track.
+        *
+        * Nullable with no default, so existing rows start as "never came back empty"
+        * and stay eligible for the next sweep. Nothing to backfill: the old
+        * `flac_upgrade_queue` rows that held per-track results were wiped by every
+        * batch, so there is no earlier history to recover. Tracks stamp themselves as
+        * sweeps find misses.
+        */
+        val MIGRATION_52_53 = object : Migration(52, 53) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN flac_no_match_at INTEGER")
+            }
+        }
+
+        /**
+         * The complete migration chain, shared by every builder of a
+         * [LumaDatabase]: the DI singleton in
+         * [com.luma.core.data.di.DatabaseModule] AND the throwaway instance
+         * DatabaseBackupManager opens over a staged backup file to roll it
+         * forward before a library-merge import (#235).
+         *
+         * Declared `by lazy` so declaration order in this companion stops
+         * mattering: the array captures every `MIGRATION_*` on first use,
+         * not while the companion is still initializing. When adding
+         * `MIGRATION_N_N+1` above, append it here too; DatabaseModule spreads
+         * this array, so there is exactly ONE place to forget — and
+         * AllMigrationsChainTest fails the build when it falls behind.
+         */
+        val ALL_MIGRATIONS: Array<Migration> by lazy {
+            arrayOf(
+                MIGRATION_3_4,
+                MIGRATION_4_5,
+                MIGRATION_5_6,
+                MIGRATION_6_7,
+                MIGRATION_7_8,
+                MIGRATION_8_9,
+                MIGRATION_9_10,
+                MIGRATION_10_11,
+                MIGRATION_11_12,
+                MIGRATION_12_13,
+                MIGRATION_13_14,
+                MIGRATION_14_15,
+                MIGRATION_15_16,
+                MIGRATION_16_17,
+                MIGRATION_17_18,
+                MIGRATION_18_19,
+                MIGRATION_19_20,
+                MIGRATION_20_21,
+                MIGRATION_21_22,
+                MIGRATION_22_23,
+                MIGRATION_23_24,
+                MIGRATION_24_25,
+                MIGRATION_25_26,
+                MIGRATION_26_27,
+                MIGRATION_27_28,
+                MIGRATION_28_29,
+                MIGRATION_29_30,
+                MIGRATION_30_31,
+                MIGRATION_31_32,
+                MIGRATION_32_33,
+                MIGRATION_33_34,
+                MIGRATION_34_35,
+                MIGRATION_35_36,
+                MIGRATION_36_37,
+                MIGRATION_37_38,
+                MIGRATION_38_39,
+                MIGRATION_39_40,
+                MIGRATION_40_41,
+                MIGRATION_41_42,
+                MIGRATION_42_43,
+                MIGRATION_43_44,
+                MIGRATION_44_45,
+                MIGRATION_45_46,
+                MIGRATION_46_47,
+                MIGRATION_47_48,
+                MIGRATION_48_49,
+                MIGRATION_49_50,
+                MIGRATION_50_51,
+                MIGRATION_51_52,
+                MIGRATION_52_53,
+            )
+        }
+    }
+}

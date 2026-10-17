@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Settings › Library & Storage: "Export for Stash on the web" (the web player's library file). -->
-    <string name="web_library_export_title">Stash on the web</string>
-    <string name="web_library_export_subtitle">Take your likes, your playlists and what you played lately to Stash on the web. Then, in the web player: Settings › Your library › Import from the Stash app.</string>
-    <string name="web_library_export_button">Export for Stash on the web</string>
+    <!-- Settings › Library & Storage: "Export for Luma on the web" (the web player's library file). -->
+    <string name="web_library_export_title">Luma on the web</string>
+    <string name="web_library_export_subtitle">Take your likes, your playlists and what you played lately to Luma on the web. Then, in the web player: Settings › Your library › Import from the Luma app.</string>
+    <string name="web_library_export_button">Export for Luma on the web</string>
     <string name="web_library_export_working_title">Exporting your library</string>
     <string name="web_library_export_done_title">Ready for the web</string>
     <!-- %1$s likes, %2$s playlists, %3$s plays: the three counts below. -->
-    <string name="web_library_export_done_body">Saved %1$s, %2$s and %3$s. Open Stash on the web and import this file in Settings › Your library.</string>
+    <string name="web_library_export_done_body">Saved %1$s, %2$s and %3$s. Open Luma on the web and import this file in Settings › Your library.</string>
     <plurals name="web_library_export_likes">
         <item quantity="one">%d like</item>
         <item quantity="other">%d likes</item>

@@ -18,15 +18,15 @@ fun Provider<PluginDependency>.toDep() = map {
 gradlePlugin {
     plugins {
         register("androidLibrary") {
-            id = "stash.android.library"
+            id = "luma.android.library"
             implementationClass = "AndroidLibraryConventionPlugin"
         }
         register("androidFeature") {
-            id = "stash.android.feature"
+            id = "luma.android.feature"
             implementationClass = "AndroidFeatureConventionPlugin"
         }
         register("composeLibrary") {
-            id = "stash.compose.library"
+            id = "luma.compose.library"
             implementationClass = "ComposeConventionPlugin"
         }
     }

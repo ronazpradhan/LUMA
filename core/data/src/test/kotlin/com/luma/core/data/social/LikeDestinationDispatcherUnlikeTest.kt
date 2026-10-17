@@ -1,0 +1,133 @@
+package com.luma.core.data.social
+
+import com.luma.core.data.db.dao.TrackDao
+import com.luma.core.data.social.spotify.SpotifyLibraryApiClient
+import com.luma.core.data.social.luma.LumaLikedPlaylistRepository
+import com.luma.core.data.social.ytmusic.YtMusicLibraryApiClient
+import com.luma.core.model.Track
+import io.mockk.coEvery
+import io.mockk.every
+import io.mockk.coVerify
+import io.mockk.mockk
+import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * v0.9.52 symmetric un-like. The load-bearing rule: NEVER un-Like
+ * what LUMA never Liked — a destination only fires when its
+ * `*_saved_at` timestamp is non-null, and a successful remote remove
+ * clears that timestamp so a future re-heart re-fires.
+ */
+class LikeDestinationDispatcherUnlikeTest {
+
+    private val spotify = mockk<SpotifyLibraryApiClient>(relaxed = true)
+    private val ytMusic = mockk<YtMusicLibraryApiClient>(relaxed = true)
+    private val lumaLiked = mockk<LumaLikedPlaylistRepository>(relaxed = true)
+    private val trackDao = mockk<TrackDao>(relaxed = true)
+    private val lastFm = mockk<com.luma.core.data.lastfm.LastFmApiClient>(relaxed = true)
+    private val lastFmSession =
+        mockk<com.luma.core.data.lastfm.LastFmSessionPreference>(relaxed = true)
+    private val dispatcher =
+        LikeDestinationDispatcher(spotify, ytMusic, lumaLiked, trackDao, lastFm, lastFmSession)
+
+    private fun track(
+        spotifySavedAt: Long? = null,
+        ytMusicSavedAt: Long? = null,
+        spotifyUri: String? = "spotify:track:abc",
+        youtubeId: String? = "vid123",
+    ) = Track(
+        id = 7L,
+        title = "t",
+        artist = "a",
+        spotifyUri = spotifyUri,
+        youtubeId = youtubeId,
+        spotifySavedAt = spotifySavedAt,
+        ytMusicSavedAt = ytMusicSavedAt,
+    )
+
+    @Test fun `skips destination Luma never saved`() = runBlocking {
+        val result = dispatcher.unlike(track(spotifySavedAt = null), setOf(Destination.SPOTIFY))
+
+        assertTrue(result[Destination.SPOTIFY]!!.isSuccess)
+        coVerify(exactly = 0) { spotify.removeTracks(any()) }
+        coVerify(exactly = 0) { trackDao.clearSpotifySaved(any()) }
+    }
+
+    @Test fun `removes on Spotify and clears dedup column when saved`() = runBlocking {
+        val result = dispatcher.unlike(track(spotifySavedAt = 111L), setOf(Destination.SPOTIFY))
+
+        assertTrue(result[Destination.SPOTIFY]!!.isSuccess)
+        coVerify { spotify.removeTracks(listOf("spotify:track:abc")) }
+        coVerify { trackDao.clearSpotifySaved(7L) }
+    }
+
+    @Test fun `removes on YT Music and clears dedup column when saved`() = runBlocking {
+        val result = dispatcher.unlike(track(ytMusicSavedAt = 222L), setOf(Destination.YT_MUSIC))
+
+        assertTrue(result[Destination.YT_MUSIC]!!.isSuccess)
+        coVerify { ytMusic.removeLike("vid123") }
+        coVerify { trackDao.clearYtMusicSaved(7L) }
+    }
+
+    @Test fun `API failure leaves dedup column untouched for organic retry`() = runBlocking {
+        coEvery { spotify.removeTracks(any()) } throws RuntimeException("boom")
+
+        val result = dispatcher.unlike(track(spotifySavedAt = 111L), setOf(Destination.SPOTIFY))
+
+        assertTrue(result[Destination.SPOTIFY]!!.isFailure)
+        coVerify(exactly = 0) { trackDao.clearSpotifySaved(any()) }
+    }
+
+    @Test fun `unlike routes LUMA to local repository remove`() = runBlocking {
+        val t = track().copy(lumaLikedAt = 333L)
+
+        val result = dispatcher.unlike(t, setOf(Destination.LUMA))
+
+        assertTrue(result[Destination.LUMA]!!.isSuccess)
+        coVerify { lumaLiked.remove(7L) }
+    }
+
+    @Test fun `empty destination set is a no-op`() = runBlocking {
+        assertTrue(dispatcher.unlike(track(), emptySet()).isEmpty())
+    }
+    /**
+     * Loves must use the SAME artist string as scrobbles.
+     *
+     * The first-artist toggle (#392) was applied to scrobbles only; loves still sent
+     * the raw `track.artist`. With the toggle on that scrobbles "Calvin Harris" and
+     * loves "Calvin Harris, Dua Lipa" — two different Last.fm catalog entries for one
+     * track, which is exactly the mismatch the toggle exists to prevent.
+     */
+    @Test fun `love uses the primary artist when the toggle is on`() = runBlocking {
+        every { lastFmSession.session } returns kotlinx.coroutines.flow.flowOf(
+            com.luma.core.data.lastfm.LastFmSession(username = "u", sessionKey = "k"),
+        )
+        every { lastFmSession.firstArtistOnly } returns kotlinx.coroutines.flow.flowOf(true)
+        coEvery { lastFm.setLoved(any(), any(), any(), any()) } returns Result.success(Unit)
+
+        dispatcher.like(
+            track(spotifyUri = null, youtubeId = null).copy(artist = "Calvin Harris, Dua Lipa"),
+            setOf(Destination.LAST_FM),
+        )
+
+        coVerify { lastFm.setLoved(any(), "Calvin Harris", any(), true) }
+    }
+
+    /** Toggle off: the full credit is preserved, unchanged behaviour. */
+    @Test fun `love keeps the full artist when the toggle is off`() = runBlocking {
+        every { lastFmSession.session } returns kotlinx.coroutines.flow.flowOf(
+            com.luma.core.data.lastfm.LastFmSession(username = "u", sessionKey = "k"),
+        )
+        every { lastFmSession.firstArtistOnly } returns kotlinx.coroutines.flow.flowOf(false)
+        coEvery { lastFm.setLoved(any(), any(), any(), any()) } returns Result.success(Unit)
+
+        dispatcher.like(
+            track(spotifyUri = null, youtubeId = null).copy(artist = "Calvin Harris, Dua Lipa"),
+            setOf(Destination.LAST_FM),
+        )
+
+        coVerify { lastFm.setLoved(any(), "Calvin Harris, Dua Lipa", any(), true) }
+    }
+
+}
