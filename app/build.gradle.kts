@@ -130,6 +130,34 @@ android {
         }
     }
 
+    // LUMA: "full" is the normal build (with Google Cast). "foss" leaves out
+    // Google Play Services so it can go on IzzyOnDroid / F-Droid; its Cast
+    // code is a stub (src/foss) that keeps the cast button hidden.
+    flavorDimensions += "distribution"
+    productFlavors {
+        create("full") {
+            dimension = "distribution"
+            isDefault = true
+            buildConfigField("String", "UPDATE_APK_NAME", "\"LUMA.apk\"")
+        }
+        create("foss") {
+            dimension = "distribution"
+            buildConfigField("String", "UPDATE_APK_NAME", "\"LUMA-foss.apk\"")
+        }
+    }
+
+    // LUMA: one smaller APK per ABI, plus the universal APK (all ABIs) that
+    // keeps the LUMA.apk name used by download links, Obtainium and the
+    // in-app updater. All share one versionCode.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a", "x86_64")
+            isUniversalApk = true
+        }
+    }
+
     buildTypes {
         release {
             // R8 minification is DISABLED because youtubedl-android embeds
@@ -172,6 +200,18 @@ android {
             // libc++_shared.so are in the same directory and can be linked at runtime.
             useLegacyPackaging = true
         }
+    }
+}
+
+// LUMA: release APK names. Universal: LUMA.apk / LUMA-foss.apk.
+// Per ABI: LUMA-arm64-v8a.apk / LUMA-foss-arm64-v8a.apk, and so on.
+android.applicationVariants.configureEach {
+    if (buildType.name != "release") return@configureEach
+    val prefix = if (flavorName == "foss") "LUMA-foss" else "LUMA"
+    outputs.configureEach {
+        val output = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
+        val abi = output.getFilter(com.android.build.OutputFile.ABI)
+        output.outputFileName = if (abi == null) "$prefix.apk" else "$prefix-$abi.apk"
     }
 }
 
@@ -233,6 +273,7 @@ dependencies {
     implementation(libs.coil.network.okhttp)
     implementation(libs.okhttp)
     // Google Cast: casting to Chromecast / Cast speakers (spec 2026-10-06).
-    implementation(libs.play.services.cast.framework)
-    implementation(libs.androidx.mediarouter)
+    // LUMA: full flavor only, so the foss build has no Google Play Services.
+    "fullImplementation"(libs.play.services.cast.framework)
+    "fullImplementation"(libs.androidx.mediarouter)
 }

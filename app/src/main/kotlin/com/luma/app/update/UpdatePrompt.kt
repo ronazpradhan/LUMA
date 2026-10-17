@@ -78,9 +78,11 @@ class UpdatePromptViewModel @Inject constructor(
         val json = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
         val version = json.optString("tag_name").removePrefix("v").takeIf { it.isNotBlank() } ?: return@withContext null
         val assets = json.optJSONArray("assets")
-        val apk = (0 until (assets?.length() ?: 0))
+        val apks = (0 until (assets?.length() ?: 0))
             .mapNotNull { assets?.optJSONObject(it) }
-            .firstOrNull { it.optString("name").endsWith(".apk") }
+            .filter { it.optString("name").endsWith(".apk") }
+        // LUMA: releases also carry per-ABI and foss APKs; prefer this flavor's universal one.
+        val apk = (apks.firstOrNull { it.optString("name") == BuildConfig.UPDATE_APK_NAME } ?: apks.firstOrNull())
             ?.optString("browser_download_url")
         LumaUpdate(
             version = version,
