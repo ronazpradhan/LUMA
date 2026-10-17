@@ -302,6 +302,8 @@ fun NowPlayingScreen(
             accentColor = npAccent(uiState.vibrantColor),
             source = uiState.source,
             isShuffleEnabled = uiState.shuffleEnabled,
+            // LUMA: Shuffle lives here now; a Listen Together room keeps everyone in one order.
+            onToggleShuffle = if (room == null) viewModel::onToggleShuffle else null,
             onDismiss = { showQueue = false },
             onTrackClick = { index ->
                 viewModel.onSkipToQueueIndex(index)
@@ -866,13 +868,11 @@ fun NowPlayingScreen(
                     PlaybackControls(
                         isPlaying = uiState.isPlaying,
                         isBuffering = uiState.isBuffering,
-                        shuffleEnabled = uiState.shuffleEnabled,
                         repeatMode = uiState.repeatMode,
                         accentColor = dynAccent,
                         onPlayPauseClick = viewModel::onPlayPauseClick,
                         onSkipNext = viewModel::onSkipNext,
                         onSkipPrevious = viewModel::onSkipPrevious,
-                        onToggleShuffle = viewModel::onToggleShuffle,
                         onCycleRepeatMode = viewModel::onCycleRepeatMode,
                         // In a session: shuffle and repeat do nothing there, so React takes their place.
                         onReact = if (room != null) together::react else null,
@@ -1554,28 +1554,26 @@ private fun AlbumArtSection(
 }
 
 /**
- * Playback controls row: shuffle, previous, play/pause, next, repeat.
+ * Playback controls row: equalizer, previous, play/pause, next, repeat (LUMA: shuffle is in the queue).
  */
 @Composable
 private fun PlaybackControls(
     isPlaying: Boolean,
     isBuffering: Boolean,
-    shuffleEnabled: Boolean,
     repeatMode: RepeatMode,
     accentColor: Color,
     onPlayPauseClick: () -> Unit,
     onSkipNext: () -> Unit,
     onSkipPrevious: () -> Unit,
-    onToggleShuffle: () -> Unit,
     onCycleRepeatMode: () -> Unit,
     onReact: ((String) -> Unit)? = null,
     /** False for a Listen Together listener: the room skips, so the slots stay empty rather than dead. */
     canSkip: Boolean = true,
-    /** LUMA: opens the equalizer, from its button beside shuffle. */
+    /** LUMA: opens the equalizer, from its button left of previous. */
     onOpenEqualizer: () -> Unit = {},
 ) {
-    // LUMA: the equalizer sits beside shuffle. Two halves of equal width keep
-    // Play exactly centred although the left half holds one more button.
+    // LUMA: equalizer + previous | Play | next + repeat. Two halves of equal
+    // width keep Play exactly centred.
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -1594,17 +1592,7 @@ private fun PlaybackControls(
             )
         }
 
-        // Shuffle; in a session, an empty slot that keeps Play centred.
-        if (onReact != null) {
-            Spacer(Modifier.size(48.dp))
-        } else IconButton(onClick = onToggleShuffle) {
-            Icon(
-                imageVector = Icons.Default.Shuffle,
-                contentDescription = "Shuffle",
-                tint = if (shuffleEnabled) accentColor else npInk().copy(alpha = 0.6f),
-                modifier = Modifier.size(24.dp),
-            )
-        }
+        // LUMA: no shuffle button here; Shuffle lives in the queue (QueueBottomSheet).
 
         // Previous
         if (!canSkip) Spacer(Modifier.size(48.dp)) else IconButton(onClick = onSkipPrevious) {

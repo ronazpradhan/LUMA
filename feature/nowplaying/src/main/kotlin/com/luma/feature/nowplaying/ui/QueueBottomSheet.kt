@@ -25,6 +25,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DragHandle
@@ -87,6 +88,8 @@ fun QueueBottomSheet(
     source: PlaybackSource = PlaybackSource.Unknown,
     /** #468: with shuffle on the rows are in play order and cannot be dragged (see below). */
     isShuffleEnabled: Boolean = false,
+    /** LUMA: Shuffle's home (the player has no shuffle button); null hides it. */
+    onToggleShuffle: (() -> Unit)? = null,
     onDismiss: () -> Unit,
     onTrackClick: (index: Int) -> Unit,
     onRemoveTrack: (index: Int) -> Unit,
@@ -157,6 +160,9 @@ fun QueueBottomSheet(
                 currentIndex = currentIndex,
                 sourceLabel = source.displayLabel,
                 showDragHint = !isShuffleEnabled,
+                shuffleOn = isShuffleEnabled,
+                accentColor = accentColor,
+                onToggleShuffle = onToggleShuffle,
                 onClose = onDismiss,
             )
 
@@ -506,6 +512,9 @@ private fun QueueHeader(
     currentIndex: Int,
     sourceLabel: String,
     showDragHint: Boolean,
+    shuffleOn: Boolean,
+    accentColor: Color,
+    onToggleShuffle: (() -> Unit)?,
     onClose: () -> Unit,
 ) {
     Row(
@@ -532,13 +541,33 @@ private fun QueueHeader(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            // Shuffle turns dragging off (the handle is hidden), so the hint goes too.
+            if (showDragHint) {
+                Text(
+                    "Drag ≡ to reorder",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                )
+            }
         }
-        // Shuffle turns dragging off (the handle is hidden), so the hint goes too.
-        if (showDragHint) {
-            Text(
-                "Drag ≡ to reorder",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+        // LUMA: the Shuffle toggle. On, the queue plays (and shows) in shuffled order.
+        if (onToggleShuffle != null) {
+            androidx.compose.material3.FilterChip(
+                selected = shuffleOn,
+                onClick = onToggleShuffle,
+                label = { Text("Shuffle") },
+                leadingIcon = {
+                    Icon(
+                        androidx.compose.material.icons.Icons.Default.Shuffle,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                },
+                colors = androidx.compose.material3.FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = accentColor.copy(alpha = 0.22f),
+                    selectedLabelColor = MaterialTheme.colorScheme.onSurface,
+                    selectedLeadingIconColor = accentColor,
+                ),
             )
         }
         IconButton(onClick = onClose) {
