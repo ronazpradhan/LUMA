@@ -17,6 +17,16 @@
 
 <p align="center">
   <a href="https://github.com/ronazpradhan/LUMA/releases/latest/download/LUMA.apk"><b>⬇ Download LUMA.apk</b></a>
+  &nbsp;·&nbsp;
+  <a href="https://playluma.vercel.app"><b>playluma.vercel.app</b></a>
+</p>
+
+<p align="center">
+  <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/ronazpradhan/LUMA"><img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png" height="54" alt="Get it on Obtainium"></a>
+</p>
+
+<p align="center">
+  Also on Windows: <a href="https://github.com/ronazpradhan/luma-for-desktop">LUMA for Windows</a>
 </p>
 
 ---
