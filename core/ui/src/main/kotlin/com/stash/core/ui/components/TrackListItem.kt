@@ -175,6 +175,8 @@ fun TrackListItem(
                 tint = primaryColor,
                 modifier = Modifier.size(18.dp),
             )
+            // LUMA: a streamed song saved without its length shows no time, not "0:00".
+            track.durationMs <= 0L -> Unit
             else -> Text(
                 text = formatDuration(track.durationMs),
                 style = MaterialTheme.typography.bodySmall,

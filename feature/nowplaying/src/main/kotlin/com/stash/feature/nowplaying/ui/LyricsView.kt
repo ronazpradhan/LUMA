@@ -22,6 +22,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -118,12 +121,7 @@ private fun LyricsLineRenderer(
             // Negative offset pulls the row up so the current line sits
             // roughly in the upper third of the visible area — matches
             // the Spotify-style "next-up" reading rhythm.
-            runCatching {
-                listState.animateScrollToItem(
-                    index = currentIndex.coerceAtMost(lines.lastIndex),
-                    scrollOffset = AUTO_SCROLL_OFFSET_PX,
-                )
-            }
+            runCatching { listState.glideToItem(currentIndex.coerceAtMost(lines.lastIndex), AUTO_SCROLL_OFFSET_PX) }
         }
     }
 
@@ -146,19 +144,29 @@ private fun LyricsLineRenderer(
             }
             val animatedAlpha by animateFloatAsState(
                 targetValue = targetAlpha,
-                animationSpec = tween(durationMillis = 250),
+                animationSpec = tween(durationMillis = 450, easing = FastOutSlowInEasing),
                 label = "lyrics-alpha-$index",
+            )
+            // LUMA: one text size for every line; the current one grows by scale on the
+            // draw layer. Switching it to a bigger font re-laid-out the list mid-scroll,
+            // which is what made the lines jump.
+            val animatedScale by animateFloatAsState(
+                targetValue = if (current) 1f else 0.86f,
+                animationSpec = tween(durationMillis = 450, easing = FastOutSlowInEasing),
+                label = "lyrics-scale-$index",
             )
             Text(
                 text = line.text,
-                style = if (current) {
-                    MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold)
-                } else {
-                    MaterialTheme.typography.titleLarge
-                },
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = animatedAlpha),
+                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
+                color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier
                     .fillMaxWidth()
+                    .graphicsLayer {
+                        alpha = animatedAlpha
+                        scaleX = animatedScale
+                        scaleY = animatedScale
+                        transformOrigin = TransformOrigin(0f, 0.5f)
+                    }
                     .clickable { onLineTap(line.timestampMs) }
                     .padding(vertical = 8.dp, horizontal = 24.dp),
             )

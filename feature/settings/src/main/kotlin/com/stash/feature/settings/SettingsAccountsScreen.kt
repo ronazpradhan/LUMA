@@ -86,25 +86,6 @@ fun SettingsAccountsScreen(
         )
     }
 
-    // Discord token paste dialog (manual fallback).
-    if (uiState.showDiscordTokenDialog) {
-        com.stash.feature.settings.components.DiscordTokenDialog(
-            isValidating = uiState.isDiscordTokenValidating,
-            errorMessage = uiState.discordTokenError,
-            onConnect = viewModel::onConnectDiscordWithToken,
-            onDismiss = viewModel::onDismissDiscordTokenDialog,
-        )
-    }
-
-    // Discord WebView login (full-screen overlay).
-    if (uiState.showDiscordWebLogin) {
-        com.stash.feature.settings.components.DiscordLoginWebView(
-            onTokenExtracted = viewModel::onDiscordWebLoginTokenExtracted,
-            onDismiss = viewModel::onDismissDiscordWebLogin,
-            onManualFallback = viewModel::onConnectDiscordManual,
-        )
-        return
-    }
 
     // YouTube error dialog (missing credentials, network failure, etc.).
     if (uiState.youTubeError != null) {
@@ -188,118 +169,7 @@ fun SettingsAccountsScreen(
             },
         )
 
-        val discordUriHandler = androidx.compose.ui.platform.LocalUriHandler.current
-        val discordNeedsConsent by viewModel.discordNeedsPresenceConsent.collectAsStateWithLifecycle()
-
-        // Discord is the one account where connecting carries a risk to the
-        // USER's account rather than just their privacy, so it is the one
-        // account that asks first. Discord has no sanctioned way for a phone
-        // app to set Rich Presence, so this drives the account's own session —
-        // what their Platform Manipulation Policy names as a self-bot, and
-        // what their support article says can end in account termination.
-        // Enforcement in practice targets spam, so the real-world risk is low;
-        // it is still not ours to take on someone else's behalf silently.
-        var showDiscordRisk by rememberSaveable { mutableStateOf(false) }
-        if (showDiscordRisk) {
-            AlertDialog(
-                onDismissRequest = { showDiscordRisk = false },
-                containerColor = MaterialTheme.colorScheme.surface,
-                shape = MaterialTheme.shapes.large,
-                title = { Text("Before you connect Discord") },
-                text = {
-                    Text(
-                        "Discord has no official way for a phone app to set your status, " +
-                            "so LUMA signs in as you and uses your account's own session. " +
-                            "Discord's rules call that a self-bot and allow them to action " +
-                            "the account.\n\nEnforcement goes after spam rather than status " +
-                            "updates, so this is unlikely — but it is your account, so it is " +
-                            "your call.\n\nDisconnecting clears your status and deletes the " +
-                            "token from this phone.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        showDiscordRisk = false
-                        viewModel.onConnectDiscord()
-                    }) { Text("Connect anyway") }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showDiscordRisk = false }) { Text("Cancel") }
-                },
-            )
-        }
-        AccountConnectionCard(
-            serviceName = "Discord",
-            icon = Icons.Rounded.Forum,
-            accentColor = androidx.compose.ui.graphics.Color(0xFF5865F2), // Discord blurple
-            authState = uiState.discordAuthState,
-            onConnect = { showDiscordRisk = true },
-            onDisconnect = viewModel::onDisconnectDiscord,
-            needsAction = discordNeedsConsent,
-            needsActionLabel = "Finish connecting",
-            onNeedsAction = {
-                viewModel.onDiscordFinishConnecting { url ->
-                    runCatching { discordUriHandler.openUri(url) }.isSuccess
-                }
-            },
-        )
-
-        // Last.fm renders via its own composable (web-auth / cookie / OAuth UX
-        // differs enough from AccountConnectionCard). The deep-link
-        // bringIntoViewRequester from the monolith is dropped here.
-        val scrobbleFirstArtistOnly by viewModel.scrobbleFirstArtistOnly.collectAsStateWithLifecycle()
-        val lastFmUriHandler = androidx.compose.ui.platform.LocalUriHandler.current
-        GlassCard {
-            com.stash.feature.settings.components.LastFmSection(
-                state = uiState.lastFmState,
-                onConnect = {
-                    viewModel.onConnectLastFm { url -> runCatching { lastFmUriHandler.openUri(url) } }
-                },
-                onFinish = viewModel::onFinishLastFmAuth,
-                onDisconnect = viewModel::onDisconnectLastFm,
-                onDismissError = viewModel::onDismissLastFmError,
-                onSyncScrobblesNow = viewModel::onSyncScrobblesNow,
-                isScrobbleDraining = uiState.isScrobbleDraining,
-                firstArtistOnly = scrobbleFirstArtistOnly,
-                onFirstArtistOnlyChange = viewModel::onScrobbleFirstArtistOnlyChanged,
-            )
-            uiState.scrobbleDrainResult?.let { result ->
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = when {
-                        !result.sessionPresent -> "Connect Last.fm first."
-                        result.submitted == 0 -> "No new scrobbles to send."
-                        else -> "Sent ${result.submitted} scrobble${if (result.submitted == 1) "" else "s"} to Last.fm."
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                androidx.compose.runtime.LaunchedEffect(result) {
-                    kotlinx.coroutines.delay(3000)
-                    viewModel.onClearScrobbleDrainResult()
-                }
-            }
-        }
-
-        // ListenBrainz sits beside Last.fm: same job, and users commonly run both
-        // rather than choosing between them.
-        val listenBrainzState by viewModel.listenBrainzState.collectAsStateWithLifecycle()
-        val listenBrainzToken by viewModel.listenBrainzTokenInput.collectAsStateWithLifecycle()
-        val listenBrainzDraining by viewModel.isListenBrainzDraining.collectAsStateWithLifecycle()
-        GlassCard {
-            com.stash.feature.settings.components.ListenBrainzSection(
-                state = listenBrainzState,
-                tokenInput = listenBrainzToken,
-                onTokenInputChange = viewModel::onListenBrainzTokenChange,
-                onConnect = viewModel::onConnectListenBrainz,
-                onDisconnect = viewModel::onDisconnectListenBrainz,
-                onNowPlayingToggle = viewModel::onListenBrainzNowPlayingToggle,
-                onSyncNow = viewModel::onSyncListenBrainzNow,
-                isDraining = listenBrainzDraining,
-            )
-        }
+        // LUMA: no Discord status, Last.fm or ListenBrainz connections.
 
         SettingsSectionLabel("Sync your likes", beta = true)
 

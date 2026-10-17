@@ -32,6 +32,7 @@ dependencies {
     implementation(libs.palette.ktx)
     implementation(libs.coil.compose)
     implementation(libs.compose.material.icons.extended)
+    implementation(libs.datastore.preferences) // LUMA: the equalizer's first-run notice store
 
     // v0.9.18 — first tests in this module. Stand up the same JUnit +
     // mockk + coroutines-test + Robolectric harness that :feature:home
@@ -46,6 +47,7 @@ dependencies {
     // fix.
     testImplementation("app.cash.turbine:turbine:1.1.0")
     testImplementation(libs.mockk)
+    testImplementation(libs.truth)
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.robolectric)
 }

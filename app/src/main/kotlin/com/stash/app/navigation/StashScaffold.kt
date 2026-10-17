@@ -27,6 +27,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
@@ -41,6 +42,17 @@ import dev.chrisbanes.haze.HazeStyle
 import dev.chrisbanes.haze.HazeTint
 import dev.chrisbanes.haze.hazeEffect
 import dev.chrisbanes.haze.hazeSource
+import androidx.compose.animation.core.Animatable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.Stroke
+import dev.chrisbanes.haze.HazeInputScale
+import com.stash.core.ui.theme.StashMotion
+import kotlinx.coroutines.launch
+import com.stash.core.ui.components.liquidGlass
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -61,7 +73,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -231,6 +242,16 @@ fun StashScaffold(
         navController.currentBackStack.value.lastOrNull { it.destination.route in topLevelRoutes }?.destination?.route
     }
 
+    // LUMA: the playing song themes the whole app: the background glow on every
+    // screen (songColors, animated), and the accent colours, surfaces and sheets
+    // (SongTheme, switched per song).
+    val npViewModel = androidx.hilt.navigation.compose.hiltViewModel<com.stash.feature.nowplaying.NowPlayingViewModel>()
+    val songColors = com.stash.feature.nowplaying.rememberSongColors(npViewModel)
+    val npState by npViewModel.uiState.collectAsStateWithLifecycle()
+    val songLead = remember(npState.hasTrack, npState.vibrantColor, npState.dominantColor) {
+        if (npState.hasTrack) com.stash.core.ui.theme.songLeadColor(npState.vibrantColor, npState.dominantColor) else null
+    }
+    com.stash.core.ui.theme.SongTheme(songLead) {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         // Default safe-drawing insets: screens avoid the status bar via the top
@@ -246,6 +267,7 @@ fun StashScaffold(
         )
         Box(modifier = Modifier.fillMaxSize()) {
             CompositionLocalProvider(
+                com.stash.core.ui.components.LocalSongColors provides songColors,
                 LocalBottomChromePadding provides chromePadding,
                 com.stash.core.ui.components.LocalTopInsetPadding provides innerPadding.calculateTopPadding(),
             ) {
@@ -272,7 +294,7 @@ fun StashScaffold(
             if (!selectionActive) {
                 val qobuzStatusViewModel: QobuzStatusViewModel = androidx.hilt.navigation.compose.hiltViewModel()
                 val qobuzStatus by qobuzStatusViewModel.bannerStatus.collectAsStateWithLifecycle()
-                val miniShape = RoundedCornerShape(22.dp)
+                val miniShape = RoundedCornerShape(percent = 50) // LUMA: a pill
 
                 Column(
                     modifier = Modifier
@@ -287,8 +309,11 @@ fun StashScaffold(
                     // LUMA: no Qobuz, so no Qobuz status banner.
                     AnimatedVisibility(
                         visibleState = chromeShown,
-                        enter = slideInVertically(tween(NAV_BAR_SLIDE_MS)) { it } + fadeIn(tween(NAV_BAR_SLIDE_MS)),
-                        exit = slideOutVertically(tween(NAV_BAR_SLIDE_MS)) { it } + fadeOut(tween(NAV_BAR_SLIDE_MS)),
+                        // Same curve as Now Playing's slide, so bar and player move as one piece.
+                        enter = slideInVertically(tween(NAV_BAR_SLIDE_MS, easing = StashMotion.Emphasized)) { it } +
+                            fadeIn(tween(NAV_BAR_SLIDE_MS / 2, delayMillis = NAV_BAR_SLIDE_MS / 4)),
+                        exit = slideOutVertically(tween(NAV_BAR_SLIDE_MS, easing = StashMotion.Emphasized)) { it } +
+                            fadeOut(tween(NAV_BAR_SLIDE_MS / 2)),
                     ) {
                         Column {
                             MiniPlayer(
@@ -319,39 +344,43 @@ fun StashScaffold(
             }
         }
     }
+    }
 }
 
 /** The tab bar's slide on and off Now Playing. */
 private const val NAV_BAR_SLIDE_MS = 350 // = StashNavHost SLIDE_DURATION_MS, so bar and player move as one
 
 /**
- * LUMA's frosted glass: whatever scrolls behind is blurred and tinted with the
- * surface color, under a soft shadow and a light rim along the top edge, the
- * way iOS and One UI draw their bars.
+ * LUMA's liquid glass: whatever scrolls behind is blurred and only lightly
+ * tinted, so the colours underneath still glow through (a heavy tint turns
+ * glass into a milky panel), then lit by [liquidGlass]: a sheen across the
+ * top, depth at the bottom and a specular rim. Below API 31 Haze can't blur,
+ * so the fallback tint is near-opaque to keep text readable.
  */
 @Composable
 private fun Modifier.glass(hazeState: HazeState, shape: Shape): Modifier {
     val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val surface = MaterialTheme.colorScheme.surface
-    val rim = Brush.verticalGradient(
-        listOf(
-            Color.White.copy(alpha = if (dark) 0.20f else 0.70f),
-            Color.White.copy(alpha = if (dark) 0.04f else 0.20f),
-        ),
-    )
     return this
-        .shadow(elevation = 18.dp, shape = shape, ambientColor = Color.Black.copy(alpha = 0.30f), spotColor = Color.Black.copy(alpha = 0.30f))
+        .shadow(elevation = 20.dp, shape = shape, ambientColor = Color.Black.copy(alpha = 0.28f), spotColor = Color.Black.copy(alpha = 0.34f))
         .clip(shape)
         .hazeEffect(
             state = hazeState,
             style = HazeStyle(
                 backgroundColor = MaterialTheme.colorScheme.background,
-                tint = HazeTint(surface.copy(alpha = if (dark) 0.52f else 0.62f)),
-                blurRadius = 28.dp,
-                noiseFactor = 0.05f,
+                // Enough frost that icons and labels stay readable over busy album art,
+                // light enough that colour still glows through.
+                tints = listOf(HazeTint(surface.copy(alpha = if (dark) 0.58f else 0.72f))),
+                blurRadius = 30.dp,
+                noiseFactor = 0.04f,
+                fallbackTint = HazeTint(surface.copy(alpha = if (dark) 0.90f else 0.92f)),
             ),
-        )
-        .border(width = 1.dp, brush = rim, shape = shape)
+        ) {
+            // Blur a downscaled copy of what's behind: the blur hides the lost detail, and
+            // each frame of a scroll or slide costs a fraction of the GPU work.
+            inputScale = HazeInputScale.Auto
+        }
+        .liquidGlass(shape)
 }
 
 /**
@@ -368,7 +397,8 @@ private fun GlassTabBar(
     val selectedIndex = tabs.indexOfFirst { it.route::class.qualifiedName == currentTabRoute }
     val haptics = LocalHapticFeedback.current
     val primary = MaterialTheme.colorScheme.primary
-    val idle = StashTheme.extendedColors.textTertiary
+    // Not textTertiary: over glass that pale grey all but vanished.
+    val idle = MaterialTheme.colorScheme.onSurfaceVariant
     val barShape = RoundedCornerShape(32.dp)
 
     BoxWithConstraints(
@@ -377,21 +407,58 @@ private fun GlassTabBar(
             .height(66.dp)
             .glass(hazeState, barShape),
     ) {
-        val itemWidth = maxWidth / tabs.size
-        val indicatorX by animateDpAsState(
-            targetValue = itemWidth * selectedIndex.coerceAtLeast(0),
-            animationSpec = spring(dampingRatio = 0.78f, stiffness = 420f),
-            label = "tabIndicator",
-        )
+        // The lit lens moves like a drop of liquid: its leading edge springs
+        // ahead and the trailing edge catches up, so it stretches as it
+        // travels and settles back to a pill where it lands. The edges are
+        // in tab units and read only while drawing, so the slide never
+        // recomposes or re-lays-out the bar: it runs on the draw pass alone.
+        val target = selectedIndex.coerceAtLeast(0)
+        val lensLeft = remember { Animatable(target.toFloat()) }
+        val lensRight = remember { Animatable(target + 1f) }
+        LaunchedEffect(target) {
+            val movingRight = target >= lensLeft.targetValue
+            val lead = spring<Float>(dampingRatio = 0.74f, stiffness = 700f)
+            val trail = spring<Float>(dampingRatio = 0.86f, stiffness = 240f)
+            launch { lensLeft.animateTo(target.toFloat(), if (movingRight) trail else lead) }
+            launch { lensRight.animateTo(target + 1f, if (movingRight) lead else trail) }
+        }
         if (selectedIndex >= 0) {
+            val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+            val count = tabs.size
             Box(
                 modifier = Modifier
-                    .offset(x = indicatorX)
-                    .width(itemWidth)
-                    .fillMaxHeight()
-                    .padding(6.dp)
-                    .clip(RoundedCornerShape(26.dp))
-                    .background(primary.copy(alpha = 0.16f)),
+                    .fillMaxSize()
+                    .drawWithCache {
+                        val inset = 6.dp.toPx()
+                        val item = size.width / count
+                        val h = size.height - inset * 2
+                        val corner = CornerRadius(h / 2, h / 2)
+                        val fill = primary.copy(alpha = 0.14f)
+                        val sheen = Brush.verticalGradient(
+                            0f to Color.White.copy(alpha = if (dark) 0.12f else 0.35f),
+                            0.5f to Color.Transparent,
+                            startY = inset,
+                            endY = inset + h,
+                        )
+                        val rim = Color.White.copy(alpha = if (dark) 0.22f else 0.60f)
+                        val rimWidth = 1.dp.toPx()
+                        onDrawBehind {
+                            val l = lensLeft.value * item + inset
+                            val w = (lensRight.value * item - inset) - l
+                            if (w <= 0f) return@onDrawBehind
+                            val topLeft = Offset(l, inset)
+                            val box = Size(w, h)
+                            drawRoundRect(fill, topLeft, box, corner)
+                            drawRoundRect(sheen, topLeft, box, corner)
+                            drawRoundRect(
+                                rim,
+                                topLeft + Offset(rimWidth / 2, rimWidth / 2),
+                                Size(w - rimWidth, h - rimWidth),
+                                corner,
+                                style = Stroke(rimWidth),
+                            )
+                        }
+                    },
             )
         }
         Row(modifier = Modifier.fillMaxSize()) {

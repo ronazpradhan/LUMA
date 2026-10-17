@@ -51,6 +51,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
+import kotlinx.coroutines.flow.collectLatest
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -124,12 +125,12 @@ fun LyricsSyllableRenderer(
         }
     }
     LaunchedEffect(items) {
-        snapshotFlow { activeIndex.value }.collect { index ->
-            if (items.isEmpty()) return@collect
+        // collectLatest: a new line takes over a glide still in flight, from where it is,
+        // instead of queueing behind it and then lurching to catch up.
+        snapshotFlow { activeIndex.value }.collectLatest { index ->
+            if (items.isEmpty()) return@collectLatest
             if (System.currentTimeMillis() - lastUserScrollAtMs > SCROLL_GRACE_MS) {
-                runCatching {
-                    listState.animateScrollToItem(index.coerceIn(0, items.lastIndex), SCROLL_OFFSET_PX)
-                }
+                runCatching { listState.glideToItem(index.coerceIn(0, items.lastIndex), SCROLL_OFFSET_PX) }
             }
         }
     }
@@ -250,7 +251,7 @@ private fun LineItem(
     val state by remember(item) { derivedStateOf { phaseOf(clock.value, item.startMs, item.endMs) } }
     val alphaAnim = animateFloatAsState(
         targetValue = when (state) { PHASE_ACTIVE -> 1f; PHASE_SUNG -> 0.497f; else -> 0.51f },
-        animationSpec = tween(300),
+        animationSpec = tween(450, easing = androidx.compose.animation.core.FastOutSlowInEasing),
         label = "line-alpha",
     )
     val blurTarget by remember(item, index) {
@@ -262,7 +263,7 @@ private fun LineItem(
             else min(BLUR_PER_LINE * (distance - 1), BLUR_MAX)
         }
     }
-    val blur by animateFloatAsState(blurTarget, tween(300), label = "line-blur")
+    val blur by animateFloatAsState(blurTarget, tween(450, easing = androidx.compose.animation.core.FastOutSlowInEasing), label = "line-blur")
 
     val line = item.line
     val description = remember(line) { line.lead.text }
@@ -569,8 +570,8 @@ internal fun WordSyncedBarLine(
     AnimatedContent(
         targetState = lineIndex,
         transitionSpec = {
-            (fadeIn(tween(250)) + slideInVertically(tween(250)) { it / 3 })
-                .togetherWith(fadeOut(tween(250)) + slideOutVertically(tween(250)) { -it / 3 })
+            (fadeIn(tween(380, delayMillis = 60)) + slideInVertically(tween(420, easing = androidx.compose.animation.core.FastOutSlowInEasing)) { it / 2 })
+                .togetherWith(fadeOut(tween(220)) + slideOutVertically(tween(420, easing = androidx.compose.animation.core.FastOutSlowInEasing)) { -it / 2 })
         },
         label = "wordBarLine",
         modifier = modifier,

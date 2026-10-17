@@ -34,7 +34,7 @@ fun PersonalizeCard(
                 color = MaterialTheme.colorScheme.onSurface,
             )
             Text(
-                text = "Connect a service and run a sync so LUMA can tailor daily discovery to your taste.",
+                text = "Connect a service and run a sync so LUMA can suggest music to your taste.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

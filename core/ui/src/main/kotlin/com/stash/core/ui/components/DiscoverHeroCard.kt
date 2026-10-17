@@ -77,13 +77,14 @@ fun DiscoverHeroCard(
     modifier: Modifier = Modifier,
     loading: Boolean = false,
 ) {
-    val shape = RoundedCornerShape(16.dp)
+    val shape = RoundedCornerShape(22.dp)
     Box(
         modifier = modifier
             .fillMaxWidth()
             .height(150.dp)
             .shadow(StashElevation.Hero, shape, clip = false)
             .clip(shape)
+            .then(if (!loading) Modifier.liquidGlass(shape, strength = 0.8f) else Modifier)
             .then(
                 if (!loading) {
                     Modifier.combinedClickable(onClick = onOpen, onLongClick = onLongPress)

@@ -2,7 +2,6 @@ package com.stash.core.media.streaming
 
 import android.content.Context
 import androidx.media3.database.StandaloneDatabaseProvider
-import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import dagger.Module
 import dagger.Provides
@@ -34,26 +33,34 @@ annotation class StreamCache
  *
  * Separate cache instance from `PreviewCacheModule` so eviction policies
  * don't collide — short preview snippets and full streamed tracks have
- * different LRU footprints. Backed by 500 MB on disk under
+ * different LRU footprints. Backed by a user-chosen limit (default 512 MB) on disk under
  * `<cacheDir>/stream_cache/` (OS may evict on storage pressure, which is
  * fine — streamed bytes are throwaway).
  */
 @Module
 @InstallIn(SingletonComponent::class)
 object StreamCacheModule {
-    private const val MAX_BYTES = 500L * 1024 * 1024  // 500 MB
     private const val CACHE_DIR = "stream_cache"
+
+    /** LUMA: the LRU limit is the user's (Settings › Streaming cache), adjustable at runtime. */
+    @Provides
+    @Singleton
+    fun provideStreamCacheEvictor(@ApplicationContext context: Context): AdjustableLruEvictor =
+        AdjustableLruEvictor(StreamCacheLimit.savedLimitBytes(context))
 
     @Provides
     @Singleton
     @StreamCache
-    fun provideStreamCache(@ApplicationContext context: Context): SimpleCache {
+    fun provideStreamCache(
+        @ApplicationContext context: Context,
+        evictor: AdjustableLruEvictor,
+    ): SimpleCache {
         val dir = File(context.cacheDir, CACHE_DIR).also { it.mkdirs() }
         // Separate database provider per cache instance (Media3 requirement;
         // sharing across SimpleCache instances corrupts internal state).
         return SimpleCache(
             dir,
-            LeastRecentlyUsedCacheEvictor(MAX_BYTES),
+            evictor,
             StandaloneDatabaseProvider(context),
         )
     }

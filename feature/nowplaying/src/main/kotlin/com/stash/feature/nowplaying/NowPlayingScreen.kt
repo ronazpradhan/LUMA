@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -30,6 +31,7 @@ import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Equalizer
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -74,6 +76,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.verticalScroll
@@ -173,6 +178,10 @@ fun NowPlayingScreen(
         animationSpec = androidx.compose.animation.core.tween(800),
         label = "npAccent",
     )
+    // The song's colour for the player's menus (3-dot, speed, sleep timer).
+    val sheetLead = remember(uiState.vibrantColor, uiState.dominantColor) {
+        com.stash.core.ui.theme.songLeadColor(uiState.vibrantColor, uiState.dominantColor)
+    }
     val resolvingArtist by viewModel.resolvingArtist.collectAsStateWithLifecycle()
     val isDownloadingCurrent by viewModel.isDownloadingCurrent.collectAsStateWithLifecycle()
     val exportingLyricsTrackId by viewModel.exportingLyricsTrackId.collectAsStateWithLifecycle()
@@ -200,6 +209,7 @@ fun NowPlayingScreen(
     val sleepTimerState by viewModel.sleepTimerState.collectAsStateWithLifecycle()
     val sleepTimerSheetState = rememberModalBottomSheetState()
     val optionsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var showEqualizer by remember { mutableStateOf(false) }
     val playbackSpeed by viewModel.playbackSpeed.collectAsStateWithLifecycle()
     var showSpeedSheet by remember { mutableStateOf(false) }
     var showCustomSpeedDialog by remember { mutableStateOf(false) }
@@ -440,13 +450,15 @@ fun NowPlayingScreen(
     }
 
     if (showSpeedSheet) {
-        SpeedSheet(
-            currentSpeed = playbackSpeed,
-            onSelect = { viewModel.onSetPlaybackSpeed(it); showSpeedSheet = false },
-            onCustom = { showSpeedSheet = false; showCustomSpeedDialog = true },
-            onDismiss = { showSpeedSheet = false },
-            sheetState = speedSheetState,
-        )
+        NpSheetTheme(sheetLead) {
+            SpeedSheet(
+                currentSpeed = playbackSpeed,
+                onSelect = { viewModel.onSetPlaybackSpeed(it); showSpeedSheet = false },
+                onCustom = { showSpeedSheet = false; showCustomSpeedDialog = true },
+                onDismiss = { showSpeedSheet = false },
+                sheetState = speedSheetState,
+            )
+        }
     }
 
     if (showCustomSpeedDialog) {
@@ -467,27 +479,29 @@ fun NowPlayingScreen(
 
     // Sleep timer bottom sheet — opened by the icon next to the track title.
     if (showSleepTimerSheet) {
-        SleepTimerSheet(
-            currentState = sleepTimerState,
-            onSelectMinutes = { minutes ->
-                viewModel.onSleepTimerMinutes(minutes)
-                showSleepTimerSheet = false
-            },
-            onSelectEndOfTrack = {
-                viewModel.onSleepTimerEndOfTrack()
-                showSleepTimerSheet = false
-            },
-            onSelectCustom = {
-                showSleepTimerSheet = false
-                showCustomTimerDialog = true
-            },
-            onCancel = {
-                viewModel.onSleepTimerCancel()
-                showSleepTimerSheet = false
-            },
-            onDismiss = { showSleepTimerSheet = false },
-            sheetState = sleepTimerSheetState,
-        )
+        NpSheetTheme(sheetLead) {
+            SleepTimerSheet(
+                currentState = sleepTimerState,
+                onSelectMinutes = { minutes ->
+                    viewModel.onSleepTimerMinutes(minutes)
+                    showSleepTimerSheet = false
+                },
+                onSelectEndOfTrack = {
+                    viewModel.onSleepTimerEndOfTrack()
+                    showSleepTimerSheet = false
+                },
+                onSelectCustom = {
+                    showSleepTimerSheet = false
+                    showCustomTimerDialog = true
+                },
+                onCancel = {
+                    viewModel.onSleepTimerCancel()
+                    showSleepTimerSheet = false
+                },
+                onDismiss = { showSleepTimerSheet = false },
+                sheetState = sleepTimerSheetState,
+            )
+        }
     }
 
     // Custom sleep-timer minutes dialog — opened from the sheet's "Custom" row.
@@ -863,6 +877,7 @@ fun NowPlayingScreen(
                         // In a session: shuffle and repeat do nothing there, so React takes their place.
                         onReact = if (room != null) together::react else null,
                         canSkip = !isListener,
+                        onOpenEqualizer = { showEqualizer = true },
                     )
                 }
 
@@ -911,29 +926,64 @@ fun NowPlayingScreen(
         }
         }
         if (room != null) com.stash.feature.nowplaying.listen.FloatingReactions(together.reactions, animate = ambientAnimationEnabled, modifier = Modifier.fillMaxSize())
+
+        // LUMA: the equalizer is a full screen of its own over the player: it slides in
+        // from the right on the song's own blurred cover, in the song's colours, and
+        // back (system or arrow) slides it away again.
+        androidx.activity.compose.BackHandler(enabled = showEqualizer) { showEqualizer = false }
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showEqualizer,
+            enter = androidx.compose.animation.slideInHorizontally(
+                androidx.compose.animation.core.tween(380, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            ) { it } + androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(200)),
+            exit = androidx.compose.animation.slideOutHorizontally(
+                androidx.compose.animation.core.tween(300, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            ) { it } + androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(250)),
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            NpSheetTheme(sheetLead) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(com.stash.core.ui.theme.StashTheme.extendedColors.elevatedSurface)
+                        // Swallow taps so nothing reaches the player underneath.
+                        .pointerInput(Unit) { detectTapGestures { } },
+                ) {
+                    FrostedArtBackdrop(
+                        artModel = track?.albumArtPath ?: track?.albumArtUrl,
+                        tint = dynTint,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    // EqualizerScreen's Scaffold pads itself for the status and navigation bars.
+                    com.stash.feature.nowplaying.equalizer.EqualizerScreen(
+                        onNavigateBack = { showEqualizer = false },
+                    )
+                }
+            }
+        }
     }
     }
 
     if (showOptionsSheet && track != null) {
         val postToCommunity = com.stash.core.ui.components.LocalPostToCommunity.current
-        NowPlayingOptionsSheet(
-            isDownloaded = track.isDownloaded,
-            onSaveClick = { showSaveSheet = true },
-            onDownloadTap = viewModel::toggleDownloadForCurrentTrack,
-            onShareClick = viewModel::onShareCurrent,
-            onPostToCommunity = postToCommunity?.let { post -> { post(com.stash.core.model.community.PostTarget.Song(track)) } },
-            onFlagWrongMatch = { showWrongMatchDialog = true },
-            onViewAlbum = viewModel::onViewAlbumTapped,
-            // The speaker decodes while casting, so speed is the phone's no longer.
-            showSpeed = room == null && !casting,
-            speed = playbackSpeed,
-            onSpeedClick = { showSpeedSheet = true },
-            together = togetherState,
-            onStartTogether = { showStartTogether = true },
-            onOpenSession = { showSession = true },
-            onDismiss = { showOptionsSheet = false },
-            sheetState = optionsSheetState,
-        )
+        NpSheetTheme(sheetLead) {
+            NowPlayingOptionsSheet(
+                onSaveClick = { showSaveSheet = true },
+                onShareClick = viewModel::onShareCurrent,
+                onPostToCommunity = postToCommunity?.let { post -> { post(com.stash.core.model.community.PostTarget.Song(track)) } },
+                onFlagWrongMatch = { showWrongMatchDialog = true },
+                onViewAlbum = viewModel::onViewAlbumTapped,
+                // The speaker decodes while casting, so speed is the phone's no longer.
+                showSpeed = room == null && !casting,
+                speed = playbackSpeed,
+                onSpeedClick = { showSpeedSheet = true },
+                together = togetherState,
+                onStartTogether = { showStartTogether = true },
+                onOpenSession = { showSession = true },
+                onDismiss = { showOptionsSheet = false },
+                sheetState = optionsSheetState,
+            )
+        }
     }
 }
 
@@ -942,11 +992,12 @@ fun NowPlayingScreen(
 // ---------------------------------------------------------------------------
 
 /**
- * LUMA: Now Playing's frosted glass. The cover fills the screen, scaled up and
- * blurred until only its colours are left, then a frost tint (milky white in the
- * light theme, smoky in the dark) evens it out so text stays readable. Crossfades
- * with the track. Android 11 and older can't blur, so there the cover only
- * tints faintly over the ambient underneath.
+ * LUMA: Now Playing's backdrop is the cover itself: filling the screen, scaled up
+ * and softly blurred so its shapes and colours still show (Apple Music style),
+ * with the sharp cover sitting on top in the middle. A light scrim that deepens
+ * toward the bottom keeps the title and controls readable on any cover.
+ * Crossfades with the track. Android 11 and older can't blur, so there the cover
+ * only tints faintly over the ambient underneath.
  */
 @Composable
 private fun FrostedArtBackdrop(artModel: Any?, tint: Color, modifier: Modifier = Modifier) {
@@ -965,29 +1016,29 @@ private fun FrostedArtBackdrop(artModel: Any?, tint: Color, modifier: Modifier =
                     contentScale = ContentScale.Crop,
                     // Richer colour, so the glass reads tinted instead of grey.
                     colorFilter = androidx.compose.ui.graphics.ColorFilter.colorMatrix(
-                        androidx.compose.ui.graphics.ColorMatrix().apply { setToSaturation(1.6f) },
+                        androidx.compose.ui.graphics.ColorMatrix().apply { setToSaturation(1.3f) },
                     ),
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer {
-                            scaleX = 1.35f
-                            scaleY = 1.35f
-                            alpha = if (canBlur) 0.95f else 0.22f
+                            scaleX = 1.2f
+                            scaleY = 1.2f
+                            alpha = if (canBlur) 1f else 0.22f
                         }
-                        .blur(90.dp, androidx.compose.ui.draw.BlurredEdgeTreatment.Rectangle),
+                        .blur(40.dp, androidx.compose.ui.draw.BlurredEdgeTreatment.Rectangle),
                 )
             }
         }
-        // Frost tinted with the cover's own dominant colour, deepening toward
-        // the bottom so the controls stay readable on any cover.
+        // A light scrim with a hint of the cover's colour, deepening toward the
+        // bottom so the title and controls stay readable on any cover.
         Box(
             Modifier
                 .fillMaxSize()
                 .background(
                     Brush.verticalGradient(
-                        0f to androidx.compose.ui.graphics.lerp(tint, Color.Black, 0.15f).copy(alpha = 0.55f),
-                        0.5f to androidx.compose.ui.graphics.lerp(tint, Color.Black, 0.35f).copy(alpha = 0.60f),
-                        1f to androidx.compose.ui.graphics.lerp(tint, Color.Black, 0.55f).copy(alpha = 0.78f),
+                        0f to androidx.compose.ui.graphics.lerp(tint, Color.Black, 0.6f).copy(alpha = 0.30f),
+                        0.45f to androidx.compose.ui.graphics.lerp(tint, Color.Black, 0.7f).copy(alpha = 0.38f),
+                        1f to androidx.compose.ui.graphics.lerp(tint, Color.Black, 0.85f).copy(alpha = 0.72f),
                     ),
                 ),
         )
@@ -1017,6 +1068,44 @@ private fun NpGlassTheme(content: @Composable () -> Unit) {
         shapes = MaterialTheme.shapes,
         content = content,
     )
+}
+
+/**
+ * LUMA: the player's menus wear the song too: a deep version of its colour
+ * with white text, matching the player behind them. A black-and-white cover
+ * ([lead] null) gets the player's own deep indigo.
+ */
+@Composable
+private fun NpSheetTheme(lead: Color?, content: @Composable () -> Unit) {
+    val deep = lead?.let { com.stash.core.ui.theme.songDeepSurface(it) } ?: Color(0xFF1C1745)
+    val accent = lead?.let { com.stash.core.ui.theme.songAccent(it, dark = true) } ?: NpViolet
+    val extended = com.stash.core.ui.theme.StashTheme.extendedColors
+    androidx.compose.runtime.CompositionLocalProvider(
+        // The sheet is always dark, so its glass, borders and faint text take the
+        // dark theme's values even when the app is light.
+        com.stash.core.ui.theme.LocalStashColors provides com.stash.core.ui.theme.StashExtendedColorsDark.copy(
+            elevatedSurface = deep,
+            spotifyGreen = extended.spotifyGreen,
+            youtubeRed = extended.youtubeRed,
+        ),
+        com.stash.core.ui.theme.LocalIsDarkTheme provides true,
+    ) {
+        MaterialTheme(
+            colorScheme = MaterialTheme.colorScheme.copy(
+                primary = accent,
+                surface = deep,
+                surfaceContainerLow = deep,
+                background = deep,
+                onBackground = Color.White,
+                onSurface = Color.White,
+                onSurfaceVariant = Color.White.copy(alpha = 0.72f),
+                outlineVariant = Color.White.copy(alpha = 0.15f),
+            ),
+            typography = MaterialTheme.typography,
+            shapes = MaterialTheme.shapes,
+            content = content,
+        )
+    }
 }
 
 /**
@@ -1482,12 +1571,29 @@ private fun PlaybackControls(
     onReact: ((String) -> Unit)? = null,
     /** False for a Listen Together listener: the room skips, so the slots stay empty rather than dead. */
     canSkip: Boolean = true,
+    /** LUMA: opens the equalizer, from its button beside shuffle. */
+    onOpenEqualizer: () -> Unit = {},
 ) {
+    // LUMA: the equalizer sits beside shuffle. Two halves of equal width keep
+    // Play exactly centred although the left half holds one more button.
     Row(
         modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+    Row(
+        modifier = Modifier.weight(1f),
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        IconButton(onClick = onOpenEqualizer) {
+            Icon(
+                imageVector = Icons.Default.Equalizer,
+                contentDescription = "Equalizer",
+                tint = npInk().copy(alpha = 0.75f),
+                modifier = Modifier.size(24.dp),
+            )
+        }
+
         // Shuffle; in a session, an empty slot that keeps Play centred.
         if (onReact != null) {
             Spacer(Modifier.size(48.dp))
@@ -1509,6 +1615,7 @@ private fun PlaybackControls(
                 modifier = Modifier.size(36.dp),
             )
         }
+    }
 
         // Play / Pause — large gradient circle. While the track is still
         // resolving/buffering, show a spinner in place of the icon so it
@@ -1548,6 +1655,11 @@ private fun PlaybackControls(
             }
         }
 
+    Row(
+        modifier = Modifier.weight(1f),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         // Next
         if (!canSkip) Spacer(Modifier.size(48.dp)) else IconButton(onClick = onSkipNext) {
             Icon(
@@ -1575,6 +1687,7 @@ private fun PlaybackControls(
                 modifier = Modifier.size(24.dp),
             )
         }
+    }
     }
 }
 
@@ -1689,9 +1802,7 @@ private fun QualityLine(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun NowPlayingOptionsSheet(
-    isDownloaded: Boolean,
     onSaveClick: () -> Unit,
-    onDownloadTap: () -> Unit,
     onShareClick: () -> Unit,
     onPostToCommunity: (() -> Unit)?,
     onFlagWrongMatch: () -> Unit,
@@ -1776,17 +1887,7 @@ private fun NowPlayingOptionsSheet(
                 )
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Download / Remove download
-            SheetOptionRow(
-                icon = if (isDownloaded) Icons.Default.DownloadDone else Icons.Default.Download,
-                label = if (isDownloaded) "Remove download" else "Download",
-                onClick = {
-                    onDownloadTap()
-                    onDismiss()
-                }
-            )
+            // LUMA: no Download here; the player's own download button covers it.
 
             Spacer(modifier = Modifier.height(8.dp))
 

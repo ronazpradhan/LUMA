@@ -137,8 +137,6 @@ import com.stash.core.ui.components.SourceIndicator
 import com.stash.data.ytmusic.model.AlbumSummary
 import com.stash.data.ytmusic.model.PlaylistSummary
 import com.stash.core.ui.theme.LocalIsDarkTheme
-import com.stash.core.ui.components.streaming.StreamingModeChip
-import com.stash.core.ui.components.streaming.StreamingModeSheet
 import androidx.compose.ui.layout.ContentScale
 import coil3.compose.AsyncImage
 import com.stash.core.ui.theme.StashTheme
@@ -183,8 +181,6 @@ fun HomeScreen(
 ) {
     // Long-pressed Stash mix whose action sheet is open (null = closed).
     var actionSheetMixId by remember { mutableStateOf<Long?>(null) }
-    // Long-pressed Daily Discover hero → its own two-row sheet (refresh / minimize).
-    var heroActionSheet by remember { mutableStateOf(false) }
     // Long-pressed "Your playlists" card → Open / Play All / Remove from Home.
     var pinnedSheetPlaylistId by remember { mutableStateOf<Long?>(null) }
     // Opening a mix = open its materialized playlist + freshen it if stale.
@@ -196,32 +192,7 @@ fun HomeScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val ytShelves by ytFeedViewModel.shelves.collectAsStateWithLifecycle()
     val anyServiceConnected by ytFeedViewModel.anyServiceConnected.collectAsStateWithLifecycle()
-    val heroMinimized by viewModel.heroMinimized.collectAsStateWithLifecycle()
-    // Master streaming-mode flag. Both the top-bar StreamingModeChip and
-    // the sheet (StreamingModeSheet) render from this single source of
-    // truth; the chip itself early-returns to nothing while the build-
-    // time kill-switch (StashConstants.STREAMING_ENGINE_ENABLED) is off.
-    val streamingEnabled by viewModel.streamingEnabled.collectAsStateWithLifecycle()
 
-    // Bottom-sheet state for the playback-mode picker triggered by the
-    // top-bar chip. The sheet is the chip's tap target — keeps the chip
-    // a single thumb-friendly icon-and-label while still routing a flip
-    // through the OnlineOfflinePicker so the user explicitly chooses a
-    // tile rather than accidentally toggling mid-scroll.
-    var showStreamingSheet by remember { mutableStateOf(false) }
-    val streamingSheetState = rememberModalBottomSheetState()
-
-    // One-time privacy disclosure dialog for streaming. Shown the first
-    // time the user enables streaming; the ViewModel persists the
-    // "seen" flag and emits a Unit signal on the SharedFlow. The toggle
-    // itself flips instantly — this dialog is informational, not a
-    // confirmation gate.
-    var showStreamingDisclosure by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        viewModel.showStreamingDisclosure.collect {
-            showStreamingDisclosure = true
-        }
-    }
 
     val toastContext = LocalContext.current
     LaunchedEffect(Unit) {
@@ -266,14 +237,7 @@ fun HomeScreen(
                 )
                 Spacer(modifier = Modifier.weight(1f))
 
-                // Streaming-mode quick-access chip. Tap → opens the
-                // StreamingModeSheet for the picker. Gated on
-                // STREAMING_ENGINE_ENABLED inside the composable so it
-                // renders nothing when the flag is off.
-                StreamingModeChip(
-                    streamingEnabled = streamingEnabled,
-                    onClick = { showStreamingSheet = true },
-                )
+                // LUMA: no Stream / Download mode pill; the saved mode stays as it is.
                 // LUMA: Settings lives here now, not in the tab bar.
                 androidx.compose.material3.IconButton(
                     onClick = onNavigateToSettings,
@@ -344,74 +308,47 @@ fun HomeScreen(
             }
         }
 
-        // ── Discover hero pager (Daily Discover + your Stash mixes) ──
-        // A mix created from the hero's ＋ ring lands right here as an
-        // identical sibling card — swipe between Daily Discover and your
-        // own mixes (dots below signal the pages). Long-press a Your-mix
-        // page for the action sheet (refresh / edit / delete / hide).
-        // Replaces the old "Your mixes" rail.
+        // ── Your-mix pager (mixes you built in the Mix Builder) ──
+        // LUMA: Daily Discover is gone and suggestions live in the "Suggested
+        // for you" row below, so this pager only holds your own mixes; it
+        // disappears when you have none. Long-press a page for its action sheet.
         item {
-            Spacer(Modifier.height(6.dp))
-            // Minimized (long-press → "Minimize for now") drops the hero page
-            // for the session; the mix pages keep the pager alive. Distinct
-            // from hero == null (not connected), which shows PersonalizeCard.
-            val hero = if (heroMinimized) null else uiState.hero
             val mixPages = uiState.yourMixes
             when {
-                uiState.isLoading -> DiscoverHeroCard(
-                    label = "Updated daily",
-                    title = "Discover",
-                    subtitle = "",
-                    artUrl = null,
-                    onPlay = {},
-                    onOpen = {},
-                    loading = true,
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                )
-                uiState.showColdStartCard && !anyServiceConnected -> PersonalizeCard(
-                    onConnect = onNavigateToSettings,
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                )
-                hero == null && mixPages.isEmpty() -> Unit // minimized, nothing to page
+                // Only on a truly empty Home: once the feed or suggestions have loaded, it is just noise.
+                uiState.showColdStartCard && !anyServiceConnected && ytShelves.isEmpty() -> {
+                    Spacer(Modifier.height(6.dp))
+                    PersonalizeCard(
+                        onConnect = onNavigateToSettings,
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                    )
+                }
+                mixPages.isEmpty() -> Unit
                 else -> {
-                    val heroPages = if (hero != null) 1 else 0
-                    val pageCount = heroPages + mixPages.size
+                    val pageCount = mixPages.size
                     val pagerState = androidx.compose.foundation.pager.rememberPagerState(
                         pageCount = { pageCount },
                     )
-                    Column {
+                    Column(modifier = Modifier.padding(top = 6.dp)) {
                         androidx.compose.foundation.pager.HorizontalPager(
                             state = pagerState,
                             contentPadding = PaddingValues(horizontal = 16.dp),
                             pageSpacing = 10.dp,
                         ) { page ->
-                            if (page < heroPages && hero != null) {
-                                DiscoverHeroCard(
-                                    label = "Updated daily",
-                                    title = hero.title,
-                                    subtitle = hero.subtitle,
-                                    artUrl = hero.artUrl,
-                                    onPlay = viewModel::playHero,
-                                    onOpen = { onNavigateToPlaylist(hero.playlistId) },
-                                    onCreateMix = { onNavigateToMixBuilder(null) },
-                                    onLongPress = { heroActionSheet = true },
-                                )
-                            } else {
-                                val m = mixPages[page - heroPages]
-                                DiscoverHeroCard(
-                                    label = "Your mix",
-                                    title = m.title,
-                                    subtitle = when (m.buildState) {
-                                        MixBuildState.BUILDING -> "building…"
-                                        MixBuildState.EMPTY -> "empty — edit to fill"
-                                        else -> pluralize(m.trackCount, "track")
-                                    },
-                                    artUrl = m.artUrl,
-                                    onPlay = { viewModel.playMix(m.id) },
-                                    onOpen = { openMix(m.id) },
-                                    onLongPress = { actionSheetMixId = m.id },
-                                )
-                            }
+                            val m = mixPages[page]
+                            DiscoverHeroCard(
+                                label = "Your mix",
+                                title = m.title,
+                                subtitle = when (m.buildState) {
+                                    MixBuildState.BUILDING -> "building…"
+                                    MixBuildState.EMPTY -> "empty — edit to fill"
+                                    else -> pluralize(m.trackCount, "track")
+                                },
+                                artUrl = m.artUrl,
+                                onPlay = { viewModel.playMix(m.id) },
+                                onOpen = { openMix(m.id) },
+                                onLongPress = { actionSheetMixId = m.id },
+                            )
                         }
                         if (pageCount > 1) {
                             Spacer(Modifier.height(8.dp))
@@ -617,36 +554,11 @@ fun HomeScreen(
                         }
                     }
                 }
-                HomeSection.COMMUNITY -> item(key = "section_community") { communitySection() }
+                HomeSection.COMMUNITY -> Unit // LUMA: no Community on Home
             }
         }
 
     }
-    }
-
-    // ── Streaming privacy disclosure (first-use only) ────────────────────
-    if (showStreamingDisclosure) {
-        com.stash.feature.home.streaming.StreamingDisclosureDialog(
-            onDismiss = { showStreamingDisclosure = false },
-        )
-    }
-
-    // ── Streaming-mode picker sheet (chip → bottom sheet) ──────────────
-    // Opens from the top-bar chip. The picker writes through the same
-    // applyStreamingMode path as Settings; here we also run the
-    // first-time disclosure handshake (HomeViewModel.onStreamingToggle).
-    // Sheet auto-dismisses on tile selection so a flip is exactly two
-    // taps: chip → tile.
-    if (showStreamingSheet) {
-        StreamingModeSheet(
-            streamingEnabled = streamingEnabled,
-            onSelect = { requested ->
-                viewModel.onStreamingToggle(requested)
-                showStreamingSheet = false
-            },
-            onDismiss = { showStreamingSheet = false },
-            sheetState = streamingSheetState,
-        )
     }
 
     // ── Stash-mix action sheet (long-press a "Your mixes" card) ──────────
@@ -799,52 +711,6 @@ fun HomeScreen(
         }
     }
 
-    // ── Daily Discover hero action sheet (long-press the hero page) ──────
-    if (heroActionSheet) {
-        val hero = uiState.hero
-        if (hero != null) {
-            val sheetState = rememberModalBottomSheetState()
-            ModalBottomSheet(
-                onDismissRequest = { heroActionSheet = false },
-                sheetState = sheetState,
-                containerColor = MaterialTheme.colorScheme.surface,
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp)
-                        .padding(bottom = 8.dp),
-                ) {
-                    Text(
-                        text = hero.title,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                MixActionRow(
-                    icon = Icons.Default.Refresh,
-                    label = "Refresh",
-                    onClick = {
-                        viewModel.refreshMix(hero.playlistId)
-                        heroActionSheet = false
-                    },
-                )
-                MixActionRow(
-                    icon = Icons.Default.VisibilityOff,
-                    label = "Minimize for now",
-                    onClick = {
-                        viewModel.setHeroMinimized(true)
-                        heroActionSheet = false
-                    },
-                )
-                Spacer(Modifier.height(12.dp))
-            }
-        }
-    }
 }
 
 // ── Mix action-sheet row ──────────────────────────────────────────────────

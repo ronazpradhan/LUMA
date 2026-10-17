@@ -636,6 +636,7 @@ private fun LibraryContent(
         val chipTabs = listOf(
             "Songs" to LibraryTab.TRACKS,
             "Liked" to LibraryTab.LIKED,
+            "History" to LibraryTab.HISTORY, // LUMA
             "Playlists" to LibraryTab.PLAYLISTS,
             "Artists" to LibraryTab.ARTISTS,
             "Albums" to LibraryTab.ALBUMS,
@@ -752,6 +753,7 @@ private fun LibraryContent(
                         onDownloadTrack = onDownloadTrack,
                         onRemoveDownloadTrack = onRemoveDownloadTrack,
                     )
+                    LibraryTab.HISTORY -> HistoryTab(currentlyPlayingTrackId = state.currentlyPlayingTrackId)
                     LibraryTab.ARTISTS -> ArtistsGrid(
                         artists = state.artists,
                         singleTrackArtists = state.singleTrackArtists,

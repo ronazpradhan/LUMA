@@ -1,4 +1,4 @@
-package com.stash.feature.settings.equalizer
+package com.stash.feature.nowplaying.equalizer
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement

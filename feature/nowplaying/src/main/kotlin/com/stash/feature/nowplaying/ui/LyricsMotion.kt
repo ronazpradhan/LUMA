@@ -1,5 +1,9 @@
 package com.stash.feature.nowplaying.ui
 
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
@@ -297,19 +301,33 @@ internal class EmphasisMotion(letterCount: Int, initialProgress: Float) {
 /**
  * Smooth playback clock. The VM polls position every 250ms; between ticks this extrapolates with
  * real time at the playback [speed]. While [isPlaying] is false it holds exactly at the last tick (no drift on pause).
- * Extrapolation is also capped at [MAX_EXTRAPOLATION_MS] so a stalled/buffering player can't run ahead.
+ *
+ * LUMA: a tick no longer snaps the clock. Extrapolation runs a few ms ahead or behind the player,
+ * and snapping to every tick made the clock step backwards four times a second: the word sweep
+ * shivered. Now a tick that agrees within [SNAP_THRESHOLD_MS] is folded in gently (part of the
+ * error per tick) and the clock never runs backwards while playing; a real jump (a seek, a new
+ * song) still snaps. Extrapolation is capped at [MAX_EXTRAPOLATION_MS] so a stalled player
+ * can't run far ahead.
  */
 @Composable
 internal fun rememberSmoothPositionMs(positionMs: Long, isPlaying: Boolean = true, speed: Float = 1f): State<Long> {
     val smooth = remember { mutableLongStateOf(positionMs) }
     LaunchedEffect(positionMs, isPlaying, speed) {
-        smooth.longValue = positionMs
+        val shown = smooth.longValue
+        val error = positionMs - shown
+        val anchor = if (!isPlaying || abs(error) > SNAP_THRESHOLD_MS) {
+            positionMs
+        } else {
+            shown + (error * TICK_CORRECTION).toLong()
+        }
+        smooth.longValue = anchor
         if (!isPlaying) return@LaunchedEffect
         val base = System.nanoTime()
         while (true) {
             withFrameNanos { }                                   // pacing only; time comes from nanoTime
             val elapsedMs = ((System.nanoTime() - base) / 1_000_000L).coerceIn(0L, MAX_EXTRAPOLATION_MS)
-            smooth.longValue = extrapolatedPositionMs(positionMs, elapsedMs, speed)
+            val next = extrapolatedPositionMs(anchor, elapsedMs, speed)
+            if (next > smooth.longValue) smooth.longValue = next
             if (elapsedMs >= MAX_EXTRAPOLATION_MS) break
         }
     }
@@ -323,4 +341,31 @@ internal fun rememberSmoothPositionMs(positionMs: Long, isPlaying: Boolean = tru
 internal fun extrapolatedPositionMs(positionMs: Long, elapsedMs: Long, speed: Float): Long =
     positionMs + (elapsedMs * speed).toLong()
 
-private const val MAX_EXTRAPOLATION_MS = 400L
+private const val MAX_EXTRAPOLATION_MS = 1_000L
+private const val SNAP_THRESHOLD_MS = 600L
+private const val TICK_CORRECTION = 0.35f
+
+/**
+ * LUMA: glide a lyrics list so [index] sits [offsetPx] from the top, on one eased curve
+ * (quick start, long soft landing), instead of the stiff default spring of animateScrollToItem.
+ * When the line is off screen it first jumps close, so long seeks don't scroll for seconds.
+ */
+internal suspend fun LazyListState.glideToItem(index: Int, offsetPx: Int) {
+    val visible = layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+    if (visible == null) {
+        val first = layoutInfo.visibleItemsInfo.firstOrNull()?.index ?: 0
+        // Land a couple of lines short, then glide the rest.
+        val near = if (index > first) (index - 2).coerceAtLeast(0) else (index + 2)
+        scrollToItem(near.coerceAtMost(layoutInfo.totalItemsCount - 1).coerceAtLeast(0), offsetPx)
+        val again = layoutInfo.visibleItemsInfo.firstOrNull { it.index == index } ?: run {
+            animateScrollToItem(index, offsetPx)
+            return
+        }
+        animateScrollBy((again.offset + offsetPx).toFloat(), tween(GLIDE_MS, easing = GlideEasing))
+        return
+    }
+    animateScrollBy((visible.offset + offsetPx).toFloat(), tween(GLIDE_MS, easing = GlideEasing))
+}
+
+private const val GLIDE_MS = 650
+private val GlideEasing = CubicBezierEasing(0.22f, 1f, 0.36f, 1f) // easeOutQuint: fast off, soft landing

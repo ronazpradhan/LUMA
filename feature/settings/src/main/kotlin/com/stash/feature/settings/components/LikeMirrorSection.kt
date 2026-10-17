@@ -42,6 +42,7 @@ fun LikeMirrorSection(
     onYtMusicToggle: (Boolean) -> Unit,
     onLastFmToggle: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    showLastFm: Boolean = false,
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -77,7 +78,8 @@ fun LikeMirrorSection(
         )
         // Last.fm loved tracks. Stash already imports your Last.fm loves; this is
         // the direction that was missing, so a heart here reaches Last.fm too.
-        MirrorToggleRow(
+        // LUMA: no Last.fm, so the row is hidden.
+        if (showLastFm) MirrorToggleRow(
             label = "Last.fm",
             connected = lastFmConnected,
             enabled = lastFmEnabled,

@@ -158,18 +158,6 @@ class HomeViewModel @Inject constructor(
     /** One-shot snackbar messages. */
     val userMessages: SharedFlow<String> = _userMessages.asSharedFlow()
 
-    /**
-     * Session-scoped "minimize Daily Discover": long-press the hero →
-     * "Minimize for now" drops the hero page until the next app launch.
-     * Deliberately not persisted — it's "hide it for a bit", not a setting.
-     */
-    private val _heroMinimized = MutableStateFlow(false)
-    val heroMinimized: StateFlow<Boolean> = _heroMinimized
-
-    fun setHeroMinimized(minimized: Boolean) {
-        _heroMinimized.value = minimized
-    }
-
     /** Everything derived from the playlists + recipe streams in one holder. */
     private data class HomePlaylistData(
         val hero: DiscoverHeroState?,

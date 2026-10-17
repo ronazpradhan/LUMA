@@ -14,7 +14,6 @@ import com.stash.core.data.lastfm.LastFmApiClient
 import com.stash.core.data.lastfm.LastFmCredentials
 import com.stash.core.data.lastfm.LastFmSessionPreference
 import com.stash.core.data.mix.MixGenerator
-import com.stash.core.data.mix.StashMixDefaults
 import com.stash.core.data.mix.TagPoolBuilder
 import com.stash.core.model.MusicSource
 import com.stash.core.model.PlaylistType
@@ -58,8 +57,18 @@ class StashMixRefreshWorkerConcurrencyTest {
             ApplicationProvider.getApplicationContext(),
             StashDatabase::class.java,
         ).build()
-        // As on first launch: StashApplication seeds Daily Discover, then starts both refreshes.
-        runBlocking { StashMixDefaults.seedIfNeeded(db.stashMixRecipeDao()) }
+        // One recipe with no playlist yet, as on a mix's first build.
+        runBlocking {
+            db.stashMixRecipeDao().insert(
+                com.stash.core.data.db.entity.StashMixRecipeEntity(
+                    name = "Daily Discover",
+                    discoveryRatio = 0.85f,
+                    targetLength = 40,
+                    seedStrategy = "ARTIST_SIMILAR",
+                    isBuiltin = true,
+                ),
+            )
+        }
     }
 
     @After fun tearDown() { db.close() }

@@ -78,7 +78,6 @@ import com.stash.feature.settings.components.SettingsToggleRow
 @Composable
 fun SettingsAudioQualityScreen(
     onBack: () -> Unit,
-    onNavigateToEqualizer: () -> Unit,
     onNavigateToSquidWtfCaptcha: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel(),
@@ -652,12 +651,7 @@ fun SettingsAudioQualityScreen(
 
         }
 
-        // (c) Effects.
-        SettingsSectionLabel("Effects")
-        SettingsNavRow(
-            title = "Equalizer",
-            onClick = onNavigateToEqualizer,
-        )
+        // LUMA: the Equalizer moved into the player, beside the shuffle button.
     }
 }
 

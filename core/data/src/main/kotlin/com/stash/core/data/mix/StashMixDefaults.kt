@@ -23,20 +23,11 @@ object StashMixDefaults {
         ALL.forEach { dao.insert(it) }
     }
 
-    val ALL: List<StashMixRecipeEntity> = listOf(
-        StashMixRecipeEntity(
-            name = "Daily Discover",
-            description = "Mostly fresh finds via similar-artists. A pinch of your library.",
-            affinityBias = 0.0f,
-            freshnessWindowDays = 7,
-            discoveryRatio = 0.85f,
-            targetLength = 40,
-            seedStrategy = "ARTIST_SIMILAR",
-            isBuiltin = true,
-        ),
-        // v0.9.40: "Deep Cuts" and "First Listen" retired — Daily Discover is
-        // the sole built-in; users build the rest via the Mix Builder.
-        // Existing installs get the two removed by
-        // StashApplication.maybeRemoveRetiredBuiltinMixes().
-    )
+    /**
+     * LUMA: empty. Daily Discover, the last built-in, was retired — Home's
+     * "Suggested for you" (ListeningSuggestions) replaces it, and
+     * StashApplication.maybeRemoveRetiredBuiltinMixes deletes it from existing
+     * installs. Every mix is now one the user builds in the Mix Builder.
+     */
+    val ALL: List<StashMixRecipeEntity> = emptyList()
 }

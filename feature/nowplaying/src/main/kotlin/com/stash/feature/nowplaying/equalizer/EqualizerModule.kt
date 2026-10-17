@@ -1,10 +1,9 @@
-package com.stash.feature.settings.di
+package com.stash.feature.nowplaying.equalizer
 
 import android.content.Context
 import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.preferencesDataStore
-import com.stash.feature.settings.equalizer.LoudnessFirstRunStore
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -22,14 +21,16 @@ private val Context.loudnessFirstRunDataStore by preferencesDataStore(
 )
 
 /**
- * Hilt module providing settings-scoped stores. Mirrors the per-concern
+ * Hilt module providing the equalizer's stores (LUMA: moved here with the
+ * equalizer, which now lives in the player; the DataStore name is unchanged so
+ * the saved flag carries over). Mirrors the per-concern
  * DataStore pattern used by `MediaModule.provideEqStore` — each store gets
  * its own [Context.preferencesDataStore] delegate so a corrupt file in one
  * feature can't take down another.
  */
 @Module
 @InstallIn(SingletonComponent::class)
-object SettingsModule {
+object EqualizerModule {
 
     @Provides
     @Singleton

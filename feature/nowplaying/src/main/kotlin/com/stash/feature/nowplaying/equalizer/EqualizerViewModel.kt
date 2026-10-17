@@ -1,5 +1,5 @@
 // EqualizerViewModel.kt
-package com.stash.feature.settings.equalizer
+package com.stash.feature.nowplaying.equalizer
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope

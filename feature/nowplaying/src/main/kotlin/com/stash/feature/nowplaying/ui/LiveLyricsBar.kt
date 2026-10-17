@@ -138,9 +138,9 @@ fun LiveLyricsBar(
                     AnimatedContent(
                         targetState = line,
                         transitionSpec = {
-                            (fadeIn(tween(250)) + slideInVertically(tween(250)) { it / 3 })
+                            (fadeIn(tween(380, delayMillis = 60)) + slideInVertically(tween(420, easing = androidx.compose.animation.core.FastOutSlowInEasing)) { it / 2 })
                                 .togetherWith(
-                                    fadeOut(tween(250)) + slideOutVertically(tween(250)) { -it / 3 },
+                                    fadeOut(tween(220)) + slideOutVertically(tween(420, easing = androidx.compose.animation.core.FastOutSlowInEasing)) { -it / 2 },
                                 )
                         },
                         label = "liveBarLine",

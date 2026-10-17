@@ -283,6 +283,9 @@ fun SettingsLibraryStorageScreen(
             }
         }
 
+        // -- LUMA: Streaming cache size ----------------------------------------
+        StreamCacheSection()
+
         // -- Stash Mixes (beta) toggle ----------------------------------------
         SettingsGroupCard(
             rows = listOf(
@@ -290,7 +293,7 @@ fun SettingsLibraryStorageScreen(
                     SettingsToggleRow(
                         title = "Stash Mixes (beta)",
                         subtitle = if (uiState.stashMixesEnabled) {
-                            "Daily Discover, Deep Cuts, and First Listen mixes auto-refresh in the background."
+                            "Mixes you build auto-refresh in the background."
                         } else {
                             "Auto-generated mix playlists are hidden. Background discovery downloads are off."
                         },

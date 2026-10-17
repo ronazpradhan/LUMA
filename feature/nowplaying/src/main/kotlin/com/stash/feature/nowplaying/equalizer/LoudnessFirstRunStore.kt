@@ -1,4 +1,4 @@
-package com.stash.feature.settings.equalizer
+package com.stash.feature.nowplaying.equalizer
 
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences

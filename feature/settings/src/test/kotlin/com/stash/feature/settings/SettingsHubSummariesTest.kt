@@ -20,24 +20,24 @@ class SettingsHubSummariesTest {
 
     // --- playback ---------------------------------------------------------
 
-    @Test fun `playback stream-only + cellular off`() {
+    @Test fun `playback cellular off`() {
         val s = settingsHubSummaries(
             state = SettingsUiState(),
             versionName = "0.9.51",
             streamingEnabled = true,
             streamOnCellular = false,
         )
-        assertEquals("Stream only · Cellular off", s.playback)
+        assertEquals("Wi-Fi only streaming", s.playback)
     }
 
-    @Test fun `playback download + cellular on`() {
+    @Test fun `playback cellular on`() {
         val s = settingsHubSummaries(
             state = SettingsUiState(),
             versionName = "0.9.51",
             streamingEnabled = false,
             streamOnCellular = true,
         )
-        assertEquals("Download · Cellular on", s.playback)
+        assertEquals("Streams on cellular", s.playback)
     }
 
     // --- audioQuality -----------------------------------------------------
@@ -96,7 +96,7 @@ class SettingsHubSummariesTest {
         assertEquals("Spotify · YouTube", s.accounts)
     }
 
-    @Test fun `accounts all three connected → ordered join`() {
+    @Test fun `accounts leave Last fm out even when connected`() {
         val s = settingsHubSummaries(
             state = SettingsUiState(
                 spotifyAuthState = connected("spotify"),
@@ -107,7 +107,7 @@ class SettingsHubSummariesTest {
             streamingEnabled = true,
             streamOnCellular = false,
         )
-        assertEquals("Spotify · YouTube · Last.fm", s.accounts)
+        assertEquals("Spotify · YouTube", s.accounts) // LUMA: no Last.fm
     }
 
     @Test fun `accounts none connected → Not connected`() {

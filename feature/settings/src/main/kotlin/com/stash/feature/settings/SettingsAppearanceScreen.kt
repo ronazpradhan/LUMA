@@ -169,12 +169,14 @@ fun SettingsAppearanceScreen(
         Spacer(Modifier.height(20.dp))
         SettingsSectionLabel("Home layout")
         Text(
-            text = "Arrange Home's sections or hide the ones you don't use. The Discover hero stays on top.",
+            text = "Arrange Home's sections or hide the ones you don't use.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
         )
-        uiState.homeSectionOrder.forEachIndexed { index, section ->
+        // LUMA: no Community on Home, so it isn't offered here.
+        val homeSections = uiState.homeSectionOrder.filter { it != com.stash.core.data.prefs.HomeSection.COMMUNITY }
+        homeSections.forEachIndexed { index, section ->
             // Community's switch is its own, off by default (spec 2026-09-26 §3), not the hidden set.
             val community = section == com.stash.core.data.prefs.HomeSection.COMMUNITY
             HomeSectionRow(
@@ -182,7 +184,7 @@ fun SettingsAppearanceScreen(
                 subtitle = if (community) "Playlists and songs other Stash listeners are into. Your posts show your name." else null,
                 shown = if (community) uiState.communityOn else section !in uiState.homeSectionsHidden,
                 canMoveUp = index > 0,
-                canMoveDown = index < uiState.homeSectionOrder.lastIndex,
+                canMoveDown = index < homeSections.lastIndex,
                 onMoveUp = { viewModel.onHomeSectionMoved(section, up = true) },
                 onMoveDown = { viewModel.onHomeSectionMoved(section, up = false) },
                 onShownChange = { shown ->

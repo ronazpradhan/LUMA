@@ -5,8 +5,9 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -14,16 +15,19 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
-import androidx.compose.material3.Icon
+import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.outlined.ArrowCircleDown
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -33,10 +37,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.foundation.background
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -45,15 +55,20 @@ import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import com.stash.core.common.primaryArtist
 import com.stash.core.media.listen.ListenTogetherState
+import com.stash.core.ui.components.DownloadingIndicator
+import com.stash.core.ui.components.LikeButton
+import com.stash.core.ui.components.ListenTogetherRole
+import com.stash.core.ui.components.LocalListenTogetherRole
 import com.stash.feature.nowplaying.listen.ListenTogetherViewModel
 import com.stash.feature.nowplaying.listen.MiniSessionFaces
 
 /**
- * Compact mini player bar that sits above the bottom navigation.
+ * Compact mini player pill that sits above the bottom navigation.
  *
- * Shows album art thumbnail, track title and artist, play/pause and skip next
- * buttons, plus a thin progress indicator at the top. Slides in/out based on
- * whether a track is currently loaded.
+ * LUMA: laid out like a music widget: the round cover ringed by the song's
+ * progress, title and artist, like and download, a hairline, then previous /
+ * play-pause (a solid disc) / next. Slides in/out based on whether a track is
+ * currently loaded.
  *
  * @param onExpand Callback invoked when the user taps the bar to expand
  *                 into the full Now Playing screen.
@@ -72,6 +87,7 @@ fun MiniPlayer(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val together by listen.state.collectAsStateWithLifecycle()
+    val isDownloading by viewModel.isDownloadingCurrent.collectAsStateWithLifecycle()
 
     AnimatedVisibility(
         visible = uiState.hasTrack,
@@ -89,72 +105,96 @@ fun MiniPlayer(
             shape = shape,
             tonalElevation = if (containerColor.alpha < 0.9f) 0.dp else 2.dp,
         ) {
-            // LUMA: the glass mini player takes the song's colours, crossfading per song;
-            // lighter in the light theme and deeper in the dark one, so the text stays readable.
-            val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-            val toward = if (dark) androidx.compose.ui.graphics.Color.Black else androidx.compose.ui.graphics.Color.White
-            val tintA by androidx.compose.animation.animateColorAsState(
-                androidx.compose.ui.graphics.lerp(uiState.dominantColor, toward, if (dark) 0.25f else 0.45f),
+            // LUMA: the mini player wears the song's colours: a deep wash of its
+            // dominant colour into its muted one, crossfading per song. The ink
+            // (text, icons, the play disc) flips dark or light to stay readable.
+            val toward = androidx.compose.ui.graphics.Color.Black
+            // The cover's most vivid colour leads; a dark photo's "dominant" is often
+            // near-black, which would make every mini player grey. Grey covers fall
+            // back to the dominant colour.
+            val lead = remember(uiState.vibrantColor, uiState.dominantColor) {
+                val hsv = FloatArray(3)
+                android.graphics.Color.colorToHSV(uiState.vibrantColor.toArgb(), hsv)
+                if (hsv[1] > 0.25f && hsv[2] > 0.2f) uiState.vibrantColor else uiState.dominantColor
+            }
+            val fillA by androidx.compose.animation.animateColorAsState(
+                androidx.compose.ui.graphics.lerp(lead, toward, 0.35f),
                 androidx.compose.animation.core.tween(800),
-                label = "miniTintA",
+                label = "miniFillA",
             )
-            val tintB by androidx.compose.animation.animateColorAsState(
-                androidx.compose.ui.graphics.lerp(uiState.vibrantColor, toward, if (dark) 0.35f else 0.55f),
+            val fillB by androidx.compose.animation.animateColorAsState(
+                androidx.compose.ui.graphics.lerp(uiState.dominantColor, toward, 0.50f),
                 androidx.compose.animation.core.tween(800),
-                label = "miniTintB",
+                label = "miniFillB",
             )
             val tinted = containerColor.alpha < 0.9f
+            val lightFill = tinted && fillA.luminance() > 0.45f
+            val songInk = if (lightFill) androidx.compose.ui.graphics.Color(0xFF14121A) else androidx.compose.ui.graphics.Color.White
             Column(
                 modifier = if (tinted) {
                     Modifier.background(
                         androidx.compose.ui.graphics.Brush.horizontalGradient(
-                            listOf(tintA.copy(alpha = 0.62f), tintB.copy(alpha = 0.40f)),
+                            listOf(fillA.copy(alpha = 0.94f), fillB.copy(alpha = 0.90f)),
                         ),
                     )
                 } else {
                     Modifier
                 },
             ) {
-                // Thin progress bar at the very top of the mini player.
-                LinearProgressIndicator(
-                    progress = { uiState.progressFraction },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(2.dp),
-                    color = dominantColor,
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
-                )
-
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                        .padding(start = 8.dp, end = 6.dp, top = 7.dp, bottom = 7.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    // Album art thumbnail.
                     val track = uiState.currentTrack
                     val artModel = track?.albumArtPath ?: track?.albumArtUrl
+                    val ink = if (tinted) songInk else MaterialTheme.colorScheme.onSurface
+                    val ringTrack = ink.copy(alpha = 0.18f)
 
-                    if (artModel != null) {
-                        AsyncImage(
-                            model = ImageRequest.Builder(LocalContext.current)
-                                .data(artModel)
-                                .build(),
-                            contentDescription = "Album art",
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .size(48.dp)
-                                .clip(RoundedCornerShape(8.dp)),
-                        )
-                    } else {
-                        Icon(
-                            imageVector = Icons.Default.MusicNote,
-                            contentDescription = null,
-                            modifier = Modifier.size(48.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                    // Round cover, with the song's progress as a ring around it.
+                    Box(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .drawBehind {
+                                val stroke = 2.dp.toPx()
+                                val topLeft = Offset(stroke / 2, stroke / 2)
+                                val arcSize = Size(size.width - stroke, size.height - stroke)
+                                drawArc(ringTrack, 0f, 360f, false, topLeft, arcSize, style = Stroke(stroke))
+                                drawArc(
+                                    color = if (tinted) ink else dominantColor,
+                                    startAngle = -90f,
+                                    sweepAngle = 360f * uiState.progressFraction.coerceIn(0f, 1f),
+                                    useCenter = false,
+                                    topLeft = topLeft,
+                                    size = arcSize,
+                                    style = Stroke(stroke, cap = StrokeCap.Round),
+                                )
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (artModel != null) {
+                            AsyncImage(
+                                model = ImageRequest.Builder(LocalContext.current)
+                                    .data(artModel)
+                                    .build(),
+                                contentDescription = "Album art",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(CircleShape),
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.MusicNote,
+                                contentDescription = null,
+                                modifier = Modifier.size(24.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
+
+                    Spacer(Modifier.width(10.dp))
 
                     // Track title and artist.
                     Column(modifier = Modifier.weight(1f)) {
@@ -165,15 +205,15 @@ fun MiniPlayer(
                         val artist = remember(track?.artist) { track?.artist?.primaryArtist() }
                         Text(
                             text = track?.title ?: "",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = ink,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
                             text = artist ?: "",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = ink.copy(alpha = 0.72f),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -181,37 +221,83 @@ fun MiniPlayer(
 
                     (together as? ListenTogetherState.InRoom)?.let { MiniSessionFaces(it) }
 
-                    // Play / Pause button — spinner while the track is still
+                    if (track != null) {
+                        LikeButton(
+                            isLiked = track.stashLikedAt != null,
+                            onTap = viewModel::onLikeTap,
+                            unlikedTint = ink.copy(alpha = 0.85f),
+                            size = 20.dp,
+                            modifier = Modifier.size(36.dp),
+                        )
+                        Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+                            if (isDownloading) {
+                                DownloadingIndicator(color = ink, size = 20.dp)
+                            } else {
+                                IconButton(
+                                    onClick = viewModel::toggleDownloadForCurrentTrack,
+                                    modifier = Modifier.size(36.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = if (track.isDownloaded) Icons.Filled.CheckCircle else Icons.Outlined.ArrowCircleDown,
+                                        contentDescription = if (track.isDownloaded) "Remove download" else "Download",
+                                        tint = if (track.isDownloaded) ink else ink.copy(alpha = 0.85f),
+                                        modifier = Modifier.size(21.dp),
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Hairline between the song's actions and the transport.
+                    Box(
+                        Modifier
+                            .padding(horizontal = 4.dp)
+                            .width(1.dp)
+                            .height(22.dp)
+                            .background(ink.copy(alpha = 0.18f)),
+                    )
+
+                    // A Listen Together listener can't change the room's song: previous/next keep
+                    // their slots, empty, so play/pause doesn't move when the host role changes hands.
+                    val listener = LocalListenTogetherRole.current == ListenTogetherRole.LISTENER
+                    if (listener) {
+                        Spacer(Modifier.size(36.dp))
+                    } else {
+                        IconButton(onClick = viewModel::onSkipPrevious, modifier = Modifier.size(36.dp)) {
+                            Icon(Icons.Default.SkipPrevious, contentDescription = "Previous", tint = ink, modifier = Modifier.size(24.dp))
+                        }
+                    }
+
+                    // Play / Pause: a solid disc. Spinner while the track is still
                     // resolving/buffering (e.g. a slow YouTube-fallback resolve).
-                    IconButton(onClick = viewModel::onPlayPauseClick, enabled = !uiState.isBuffering) {
+                    // The play glyph is cut from the disc in the song's colour.
+                    val onInk = if (tinted) fillA else MaterialTheme.colorScheme.surface
+                    Box(
+                        modifier = Modifier
+                            .padding(horizontal = 2.dp)
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(ink)
+                            .clickable(enabled = !uiState.isBuffering, onClick = viewModel::onPlayPauseClick),
+                        contentAlignment = Alignment.Center,
+                    ) {
                         if (uiState.isBuffering) {
-                            CircularProgressIndicator(
-                                color = MaterialTheme.colorScheme.onSurface,
-                                strokeWidth = 2.5.dp,
-                                modifier = Modifier.size(24.dp),
-                            )
+                            CircularProgressIndicator(color = onInk, strokeWidth = 2.dp, modifier = Modifier.size(20.dp))
                         } else {
                             Icon(
                                 imageVector = if (uiState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                                 contentDescription = if (uiState.isPlaying) "Pause" else "Play",
-                                tint = MaterialTheme.colorScheme.onSurface,
-                                modifier = Modifier.size(28.dp),
+                                tint = onInk,
+                                modifier = Modifier.size(24.dp),
                             )
                         }
                     }
 
-                    // Skip next button. A Listen Together listener can't skip the room's song: the slot stays, empty,
-                    // so play/pause doesn't move when the host role changes hands.
-                    if (com.stash.core.ui.components.LocalListenTogetherRole.current == com.stash.core.ui.components.ListenTogetherRole.LISTENER) {
-                        Spacer(Modifier.size(48.dp))
+                    if (listener) {
+                        Spacer(Modifier.size(36.dp))
                     } else {
-                        IconButton(onClick = viewModel::onSkipNext) {
-                            Icon(
-                                imageVector = Icons.Default.SkipNext,
-                                contentDescription = "Next",
-                                tint = MaterialTheme.colorScheme.onSurface,
-                                modifier = Modifier.size(24.dp),
-                            )
+                        IconButton(onClick = viewModel::onSkipNext, modifier = Modifier.size(36.dp)) {
+                            Icon(Icons.Default.SkipNext, contentDescription = "Next", tint = ink, modifier = Modifier.size(24.dp))
                         }
                     }
                 }

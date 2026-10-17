@@ -59,7 +59,7 @@ import com.stash.feature.search.ArtistProfileScreen
 import com.stash.feature.search.SearchScreen
 import com.stash.feature.settings.BlockedSongsScreen
 import com.stash.feature.settings.SettingsHubScreen
-import com.stash.feature.settings.equalizer.EqualizerScreen
+import com.stash.feature.nowplaying.equalizer.EqualizerScreen
 import com.stash.feature.settings.libraryhealth.LibraryHealthScreen
 import com.stash.feature.sync.FailedDownloadsScreen
 import com.stash.feature.sync.DownloadManagementScreen
@@ -388,7 +388,6 @@ private fun StashNavGraph(
                 androidx.hilt.navigation.compose.hiltViewModel(settingsEntry)
             com.stash.feature.settings.SettingsAudioQualityScreen(
                 onBack = { navController.popBackStack() },
-                onNavigateToEqualizer = { navController.navigate(EqualizerRoute) },
                 onNavigateToSquidWtfCaptcha = { navController.navigate(SquidWtfCaptchaRoute) },
                 viewModel = viewModel,
             )
@@ -613,25 +612,25 @@ private fun StashNavGraph(
             enterTransition = {
                 slideIntoContainer(
                     towards = AnimatedContentTransitionScope.SlideDirection.Up,
-                    animationSpec = tween(SLIDE_DURATION_MS),
+                    animationSpec = tween(SLIDE_DURATION_MS, easing = com.stash.core.ui.theme.StashMotion.Emphasized),
                 )
             },
             exitTransition = {
                 slideOutOfContainer(
                     towards = AnimatedContentTransitionScope.SlideDirection.Down,
-                    animationSpec = tween(SLIDE_DURATION_MS),
+                    animationSpec = tween(SLIDE_DURATION_MS, easing = com.stash.core.ui.theme.StashMotion.Emphasized),
                 )
             },
             popEnterTransition = {
                 slideIntoContainer(
                     towards = AnimatedContentTransitionScope.SlideDirection.Up,
-                    animationSpec = tween(SLIDE_DURATION_MS),
+                    animationSpec = tween(SLIDE_DURATION_MS, easing = com.stash.core.ui.theme.StashMotion.Emphasized),
                 )
             },
             popExitTransition = {
                 slideOutOfContainer(
                     towards = AnimatedContentTransitionScope.SlideDirection.Down,
-                    animationSpec = tween(SLIDE_DURATION_MS),
+                    animationSpec = tween(SLIDE_DURATION_MS, easing = com.stash.core.ui.theme.StashMotion.Emphasized),
                 )
             },
         ) {

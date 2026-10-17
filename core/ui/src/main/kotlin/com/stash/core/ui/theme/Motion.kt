@@ -12,4 +12,6 @@ object StashMotion {
     // Material standard curves.
     val EaseEnter: Easing = CubicBezierEasing(0.0f, 0.0f, 0.2f, 1.0f)  // FastOutSlowIn (decelerate)
     val EaseExit: Easing = CubicBezierEasing(0.4f, 0.0f, 1.0f, 1.0f)   // FastOutLinearIn (accelerate)
+    /** LUMA: Material 3 emphasized — quick off the mark, long soft landing. For big moves (Now Playing). */
+    val Emphasized: Easing = CubicBezierEasing(0.2f, 0.0f, 0.0f, 1.0f)
 }

@@ -821,7 +821,8 @@ class StashApplication : Application(), Configuration.Provider {
         val prefs = getSharedPreferences("stash_migrations", MODE_PRIVATE)
         if (prefs.getInt("stash_mix_retired_version", 0) >= STASH_MIX_RETIRED_VERSION) return
 
-        val retired = listOf("Deep Cuts", "First Listen")
+        // LUMA (v2): Daily Discover goes too; Home's "Suggested for you" replaces it.
+        val retired = listOf("Deep Cuts", "First Listen", "Daily Discover", "Stash Discover")
         val recipes = stashMixRecipeDao.getBuiltinsByName(retired)
         recipes.mapNotNull { it.playlistId }.forEach { playlistDao.deleteById(it) }
         val removed = stashMixRecipeDao.deleteBuiltinsByName(retired)
@@ -1034,7 +1035,7 @@ class StashApplication : Application(), Configuration.Provider {
          *  - v1 = the 0.9.40 removal of "Deep Cuts" + "First Listen"
          *    (Daily Discover and all custom mixes are preserved).
          */
-        private const val STASH_MIX_RETIRED_VERSION = 1
+        private const val STASH_MIX_RETIRED_VERSION = 2
 
         /**
          * Bump when the built-in Stash Discover recipe's tunables change

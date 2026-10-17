@@ -30,9 +30,8 @@ fun settingsHubSummaries(
     streamingEnabled: Boolean,
     streamOnCellular: Boolean,
 ): HubSummaries {
-    val mode = if (streamingEnabled) "Stream only" else "Download"
-    val cellular = if (streamOnCellular) "Cellular on" else "Cellular off"
-    val playback = "$mode · $cellular"
+    // LUMA: no Stream only / Download picker in Settings any more, so only cellular is summarised.
+    val playback = if (streamOnCellular) "Streams on cellular" else "Wi-Fi only streaming"
 
     val audioQuality = if (state.losslessEnabled) {
         val shortLossless = state.losslessQualityTier.displayLabel.substringBefore(" (")
@@ -44,7 +43,6 @@ fun settingsHubSummaries(
     val connectedServices = buildList {
         if (state.spotifyAuthState is AuthState.Connected) add("Spotify")
         if (state.youTubeAuthState is AuthState.Connected) add("YouTube")
-        if (state.lastFmState is LastFmAuthState.Connected) add("Last.fm")
     }
     val accounts = if (connectedServices.isEmpty()) {
         "Not connected"

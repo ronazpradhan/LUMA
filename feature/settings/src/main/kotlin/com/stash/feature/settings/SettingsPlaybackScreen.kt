@@ -45,10 +45,7 @@ fun SettingsPlaybackScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel(),
-    lyricsViewModel: LyricsSettingsViewModel = hiltViewModel(),
 ) {
-    val lyricsSourcePreference by lyricsViewModel.sourcePreference.collectAsStateWithLifecycle()
-    val streamingEnabled by viewModel.streamingEnabled.collectAsStateWithLifecycle()
     val streamOnCellular by viewModel.streamOnCellular.collectAsStateWithLifecycle()
     val forceYouTubeFallback by viewModel.forceYouTubeFallback.collectAsStateWithLifecycle()
     val forceQbdlxOnly by viewModel.forceQbdlxOnly.collectAsStateWithLifecycle()
@@ -65,13 +62,7 @@ fun SettingsPlaybackScreen(
 
     SettingsScaffold(title = "Playback", onBack = onBack, modifier = modifier) {
         if (StashConstants.STREAMING_ENGINE_ENABLED) {
-            SettingsSectionLabel("Mode")
-            SettingsSegmented(
-                options = listOf("Stream only", "Download"),
-                selectedIndex = if (streamingEnabled) 0 else 1,
-                onSelect = { viewModel.onStreamingToggle(it == 0) },
-            )
-
+            // LUMA: no "Stream only / Download" mode picker here.
             SettingsSectionLabel("Streaming")
             SettingsGroupCard(
                 rows = buildList {
@@ -129,31 +120,7 @@ fun SettingsPlaybackScreen(
                 }
             },
         )
-
-        SettingsSectionLabel("Lyrics")
-        SettingsSegmented(
-            options = listOf("Apple Music", "LRC only"),
-            selectedIndex = if (lyricsSourcePreference == LyricsSourcePreference.LRC_ONLY) 1 else 0,
-            onSelect = {
-                lyricsViewModel.setSourcePreference(
-                    if (it == 1) LyricsSourcePreference.LRC_ONLY else LyricsSourcePreference.APPLE_MUSIC,
-                )
-            },
-        )
-        Text(
-            text = if (lyricsSourcePreference == LyricsSourcePreference.LRC_ONLY) {
-                "Word-synced lyrics are off. Switching back doesn't re-fetch anything right away — " +
-                    "tracks pick up Apple Music's word-synced lyrics the next time they're fetched " +
-                    "(a new release's automatic pass, or \"Fetch lyrics\" in Library Health)."
-            } else {
-                "Prefers Apple Music's word-synced lyrics. Switching to LRC only removes any " +
-                    "stored word-synced lyrics and re-fetches from line-synced sources — use " +
-                    "\"Fetch lyrics\" in Library Health to run it now."
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = SettingsRowPadH, vertical = 8.dp),
-        )
+        // LUMA: no Lyrics section; LUMA keeps the default source.
     }
 }
 

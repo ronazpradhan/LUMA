@@ -1,5 +1,5 @@
 // EqualizerViewModelTest.kt
-package com.stash.feature.settings.equalizer
+package com.stash.feature.nowplaying.equalizer
 
 import com.google.common.truth.Truth.assertThat
 import com.stash.core.data.audio.LoudnessProgressStore
