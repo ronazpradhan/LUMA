@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ronazpradhan/LUMA/releases"><img src="https://img.shields.io/github/downloads/ronazpradhan/LUMA/total?label=downloads&color=b4a7f5" alt="Total downloads"></a>
+  <a href="https://github.com/ronazpradhan/LUMA/releases"><img src="https://img.shields.io/github/downloads/ronazpradhan/LUMA/total?label=downloads&color=b4a7f5&cacheSeconds=3600" alt="Total downloads"></a>
   <a href="https://github.com/ronazpradhan/LUMA/releases/latest"><img src="https://img.shields.io/github/v/release/ronazpradhan/LUMA?label=latest&color=b4a7f5" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/Android-8.0%2B-3ddc84?logo=android&logoColor=white" alt="Android 8.0+">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="GPL-3.0"></a>
@@ -63,8 +63,7 @@ Besides Spotify and YouTube, LUMA talks to:
 - **MusicBrainz** (artist info) and **JioSaavn** (AAC fallback).
 - **GitHub** (update checks for LUMA and yt-dlp).
 - **Spotify's public embed page**, only when you import a playlist link.
-- **ListenBrainz / Discord**, only if you connect them.
-- **Stash share service**, only for shared links or Community.
+- **Stash share service**, only for shared links.
 - **Google Cast**, only when you open the speaker list.
 
 Last.fm, Qobuz and the Stash lossless relay are never contacted. Full details of what each service receives: [Stash README](https://github.com/rawnaldclark/Stash#what-stash-talks-to).
