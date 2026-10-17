@@ -91,10 +91,13 @@ class LumaApplication : Application(), Configuration.Provider {
     lateinit var listeningRecorder: ListeningRecorder
 
     @Inject
-    lateinit var lastFmScrobbler: LastFmScrobbler
+    lateinit var tokenManager: com.luma.core.auth.TokenManager
 
     @Inject
-    lateinit var discordRpcCoordinator: com.luma.core.data.discord.DiscordRpcCoordinator
+    lateinit var lastFmSessionPreference: com.luma.core.data.lastfm.LastFmSessionPreference
+
+    @Inject
+    lateinit var listenBrainzPreference: com.luma.core.data.listenbrainz.ListenBrainzPreference
 
     @Inject
     lateinit var youTubeHistoryScrobbler: YouTubeHistoryScrobbler
@@ -516,12 +519,12 @@ class LumaApplication : Application(), Configuration.Provider {
         // they no-op until configuration/authentication is in place, and the
         // recorder just observes the player regardless of whether scrobbling is on.
         listeningRecorder.start()
-        lastFmScrobbler.start()
         youTubeHistoryScrobbler.start()
         autoSaveScrobbler.start()
-        discordRpcCoordinator.start()
-        // Generic listen sinks (ListenBrainz). No-ops until connected.
-        listenSinkCoordinator.start()
+        // LUMA: no Last.fm scrobbling, Discord status or ListenBrainz. Their settings
+        // are gone, so they must not run either: a user who had connected one could
+        // no longer see or stop it. disconnectRemovedServices() also signs them out once.
+        applicationScope.launch { disconnectRemovedServices() }
 
         // Wire the three reactive triggers (cookie change /
         // lastKnownBadCookie transition / rate-limiter circuit-reset
@@ -817,6 +820,24 @@ class LumaApplication : Application(), Configuration.Provider {
      * user-created mixes untouched. Gated by [LUMA_MIX_RETIRED_VERSION] so it
      * runs once per install; fresh installs never seed them (see LumaMixDefaults).
      */
+    /**
+     * LUMA: Last.fm, ListenBrainz and Discord were removed from Settings in 1.3.0.
+     * Clears any sign-in a user made before that, once, so nothing keeps sending
+     * their listening to a service they can no longer see in the app.
+     */
+    private suspend fun disconnectRemovedServices() {
+        val prefs = getSharedPreferences("luma_migrations", MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_REMOVED_SERVICES_DISCONNECTED, false)) return
+        runCatching { lastFmSessionPreference.clear() }
+            .onFailure { Log.w("LumaMigration", "last.fm sign-out failed", it) }
+        runCatching { listenBrainzPreference.clear() }
+            .onFailure { Log.w("LumaMigration", "listenbrainz sign-out failed", it) }
+        runCatching { tokenManager.clearAuth(com.luma.core.auth.model.AuthService.DISCORD) }
+            .onFailure { Log.w("LumaMigration", "discord sign-out failed", it) }
+        runCatching { lastFmRecommendationSource.reconcile() }
+        prefs.edit().putBoolean(KEY_REMOVED_SERVICES_DISCONNECTED, true).apply()
+    }
+
     private suspend fun maybeRemoveRetiredBuiltinMixes() {
         val prefs = getSharedPreferences("stash_migrations", MODE_PRIVATE)
         if (prefs.getInt("stash_mix_retired_version", 0) >= LUMA_MIX_RETIRED_VERSION) return
@@ -1036,6 +1057,7 @@ class LumaApplication : Application(), Configuration.Provider {
          *    (Daily Discover and all custom mixes are preserved).
          */
         private const val LUMA_MIX_RETIRED_VERSION = 2
+        private const val KEY_REMOVED_SERVICES_DISCONNECTED = "removed_services_disconnected_v1"
 
         /**
          * Bump when the built-in LUMA Discover recipe's tunables change

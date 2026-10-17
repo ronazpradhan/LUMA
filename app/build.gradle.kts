@@ -189,6 +189,7 @@ dependencies {
     implementation(project(":core:data"))
     implementation(project(":core:media"))
     implementation(project(":core:network"))
+    implementation(project(":core:auth"))
     implementation(project(":feature:home"))
     implementation(project(":feature:library"))
     implementation(project(":feature:nowplaying"))
