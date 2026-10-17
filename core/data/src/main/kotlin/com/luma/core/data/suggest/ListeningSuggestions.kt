@@ -12,7 +12,10 @@ import com.luma.data.ytmusic.model.YTHomeItem
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.ln
@@ -31,12 +34,12 @@ data class Suggestions(
 /**
  * LUMA: "Suggested for you", shared by Home and Search.
  *
- * Seeds are drawn from what you actually like: recent plays and your most-played
+ * Seeds are drawn from what you actually like: the song on now, recent plays and your most-played
  * songs, weighted by how recently and how often you played them (liked songs count
  * extra), one per artist, never a song you keep skipping. Each seed's YouTube Music
  * song radio is fetched and the candidates are ranked by [SuggestionRanker]: a song
  * several of your seeds point at beats one only a single radio offered, and YouTube's
- * own order inside each radio counts. Songs you already play, blocked songs and
+ * own order inside each radio counts. Every song you have ever played, blocked songs and
  * early-skipped songs are dropped, and no artist gets more than two slots. A little
  * randomness in the seeds and scores keeps each refresh fresh without going random.
  * With no listening history yet, your YouTube Music Quick picks.
@@ -49,7 +52,25 @@ class ListeningSuggestions @Inject constructor(
     private val skipEventDao: TrackSkipEventDao,
     private val matcher: TrackMatcher,
 ) {
-    suspend fun load(limit: Int = 25): Suggestions {
+    /**
+     * Fires when your listening history moves on (a new song counted as listened),
+     * so Home can freshen its suggestions while you listen.
+     */
+    fun listeningChanges(): Flow<Long?> =
+        trackDao.observeListeningHistory(1, 0L)
+            .map { rows -> rows.firstOrNull()?.lastPlayed?.toEpochMilli() }
+            .distinctUntilChanged()
+
+    /**
+     * @param nowPlaying the song playing right now, if any: it seeds the suggestions
+     *   first and is never suggested itself.
+     * @param alsoExclude YouTube ids not to suggest (e.g. songs already on screen).
+     */
+    suspend fun load(
+        limit: Int = 25,
+        nowPlaying: NowPlaying? = null,
+        alsoExclude: Set<String> = emptySet(),
+    ): Suggestions {
         val recent = trackDao.getRecentlyPlayed(RECENT_POOL)
         val mostPlayed = runCatching { trackDao.getMostPlayed(TOP_POOL).first() }.getOrDefault(emptyList())
         val blocked = runCatching { blocklistDao.getAllKeys().toSet() }.getOrDefault(emptySet())
@@ -61,8 +82,12 @@ class ListeningSuggestions @Inject constructor(
             ).toSet()
         }.getOrDefault(emptySet())
 
+        // The song on now leads the seeds: what you're into this minute matters most.
+        val nowSeed = nowPlaying?.takeIf { it.videoId.isNotBlank() }?.let {
+            SeedCandidate(it.videoId, it.title, it.artist, BlocklistKey.of(it.artist, it.title, matcher), playCount = 3, liked = false)
+        }
         val seeds = SuggestionRanker.pickSeeds(
-            recent = recent.map { it.toSeedCandidate() },
+            recent = listOfNotNull(nowSeed) + recent.map { it.toSeedCandidate() },
             mostPlayed = mostPlayed.map { it.toSeedCandidate() },
             excludedKeys = blocked + skipped,
             count = SEEDS,
@@ -82,10 +107,12 @@ class ListeningSuggestions @Inject constructor(
                 async { runCatching { ytMusic.getSongRadio(seed.videoId) }.getOrDefault(emptyList()) }
             }.awaitAll()
         }
-        // Everything you already know is left out: the point is songs you haven't found yet.
-        val known = recent + mostPlayed
-        val knownIds = known.mapNotNull { it.youtubeId }.toSet()
-        val knownKeys = known.map { BlocklistKey.fromStoredCanonicals(it.canonicalArtist, it.canonicalTitle) }.toSet()
+        // Everything you've ever listened to is left out, as is the song on now and
+        // anything the caller already shows: the point is songs you haven't found yet.
+        val played = runCatching { trackDao.getPlayedIdentities() }.getOrDefault(emptyList())
+        val knownIds = played.mapNotNull { it.youtubeId }.toSet() + alsoExclude + listOfNotNull(nowPlaying?.videoId)
+        val knownKeys = played.map { BlocklistKey.fromStoredCanonicals(it.canonicalArtist, it.canonicalTitle) }.toSet() +
+            listOfNotNull(nowSeed?.key)
         val songs = SuggestionRanker.rank(
             radios = seeds.zip(radios) { seed, radio -> seed.weight to radio },
             isExcluded = { t ->
@@ -119,6 +146,9 @@ class ListeningSuggestions @Inject constructor(
         const val EARLY_SKIP_MS = 30_000L
     }
 }
+
+/** The song playing right now, as Home hands it to [ListeningSuggestions.load]. */
+data class NowPlaying(val videoId: String, val title: String, val artist: String)
 
 /** A song you played, as a possible seed. [key] is its canonical "artist|title". */
 data class SeedCandidate(

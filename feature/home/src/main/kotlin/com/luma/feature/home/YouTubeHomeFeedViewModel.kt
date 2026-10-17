@@ -17,6 +17,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.async
@@ -65,49 +66,87 @@ class YouTubeHomeFeedViewModel @Inject constructor(
 
     private var loading = false
 
-    init { refresh() }
+    /** The two halves of Home's rows: "Suggested for you" and YouTube Music's own feed. */
+    private var suggested: YTHomeShelf? = null
+    private var feed: List<YTHomeShelf> = emptyList()
+    private var suggestJob: kotlinx.coroutines.Job? = null
+    private var lastSuggestAt = 0L
 
-    /** Re-reads the feed; a failed read keeps the rows already shown. [userPulled] shows the spinner. */
+    init {
+        refresh()
+        // LUMA: Home keeps up with you. Each time a song counts as listened, the
+        // suggestions are worked out again in the background (at most every
+        // SUGGEST_MIN_GAP_MS), so the row reflects what you've been playing.
+        viewModelScope.launch {
+            listeningSuggestions.listeningChanges().drop(1).collect { refreshSuggestions() }
+        }
+    }
+
+    /** Puts both halves on screen. Suggestions never repeat a song the feed below shows, or the one playing. */
+    private fun publish() {
+        val shownBelow = feedSongIds()
+        val playing = playerRepository.playerState.value.currentTrack?.youtubeId
+        val picks = suggested?.let { shelf ->
+            shelf.copy(items = shelf.items.filterNot { it is YTHomeItem.Song && (it.track.videoId in shownBelow || it.track.videoId == playing) })
+        }?.takeIf { it.items.size >= MIN_SUGGESTIONS }
+        val next = listOfNotNull(picks) + feed
+        if (next.isNotEmpty()) _shelves.value = next
+    }
+
+    private fun feedSongIds(): Set<String> =
+        feed.flatMap { shelf -> shelf.items.filterIsInstance<YTHomeItem.Song>().map { it.track.videoId } }.toSet()
+
+    /** Re-reads the feed and the suggestions; a failed read keeps the rows already shown. [userPulled] shows the spinner until both land. */
     fun refresh(userPulled: Boolean = false) {
         if (loading) return
         loading = true
         if (userPulled) _refreshing.value = true
-        // The feed and "Suggested for you" load side by side and each lands as soon
-        // as it is ready; the rows on screen stay until then. The spinner stops
-        // with the feed, not with the slower suggestions.
-        var suggested: YTHomeShelf? = _shelves.value.firstOrNull { it.title == SUGGESTED_TITLE }
-        var home: List<YTHomeShelf> = _shelves.value.filter { it.title != SUGGESTED_TITLE }
-        fun publish() {
-            val next = listOfNotNull(suggested) + home
-            if (next.isNotEmpty()) _shelves.value = next
-        }
         viewModelScope.launch {
-            val picks = launch {
-                val s = kotlinx.coroutines.withTimeoutOrNull(SUGGEST_TIMEOUT_MS) {
-                    runCatching { listeningSuggestions.load() }.getOrNull()
-                }
-                s?.takeIf { it.basedOn != null && it.songs.isNotEmpty() }?.let { found ->
-                    suggested = YTHomeShelf(SUGGESTED_TITLE, found.songs.map { YTHomeItem.Song(it) })
-                    publish()
-                }
-            }
             try {
-                val feed = runCatching { ytMusic.getHomeFeed() }.getOrDefault(emptyList())
-                if (feed.isNotEmpty()) {
-                    home = feed.map { shelf -> if (userPulled) shelf.copy(items = shelf.items.shuffled()) else shelf }
+                val picks = launch { loadSuggestions() }
+                val fresh = runCatching { ytMusic.getHomeFeed() }.getOrDefault(emptyList())
+                if (fresh.isNotEmpty()) {
+                    feed = fresh.map { shelf -> if (userPulled) shelf.copy(items = shelf.items.shuffled()) else shelf }
                     publish()
                 }
+                picks.join()
             } finally {
                 _refreshing.value = false
+                loading = false
             }
-            picks.join()
-            loading = false
+        }
+    }
+
+    /** Suggestions only, in the background: after a listen, without touching the feed. */
+    private fun refreshSuggestions() {
+        if (suggestJob?.isActive == true) return
+        if (System.currentTimeMillis() - lastSuggestAt < SUGGEST_MIN_GAP_MS) return
+        suggestJob = viewModelScope.launch { loadSuggestions() }
+    }
+
+    private suspend fun loadSuggestions() {
+        lastSuggestAt = System.currentTimeMillis()
+        val now = playerRepository.playerState.value.currentTrack
+        val found = kotlinx.coroutines.withTimeoutOrNull(SUGGEST_TIMEOUT_MS) {
+            runCatching {
+                listeningSuggestions.load(
+                    nowPlaying = now?.youtubeId?.let { com.luma.core.data.suggest.NowPlaying(it, now.title, now.artist) },
+                    alsoExclude = feedSongIds(),
+                )
+            }.getOrNull()
+        }
+        found?.takeIf { it.basedOn != null && it.songs.isNotEmpty() }?.let {
+            suggested = YTHomeShelf(SUGGESTED_TITLE, it.songs.map { song -> YTHomeItem.Song(song) })
+            publish()
         }
     }
 
     private companion object {
         const val SUGGESTED_TITLE = "Suggested for you"
-        const val SUGGEST_TIMEOUT_MS = 6_000L
+        const val SUGGEST_TIMEOUT_MS = 12_000L
+        const val SUGGEST_MIN_GAP_MS = 90_000L
+        /** Fewer than this after removing on-screen songs and the row is not worth showing. */
+        const val MIN_SUGGESTIONS = 4
     }
 
     fun play(item: YTHomeItem) {

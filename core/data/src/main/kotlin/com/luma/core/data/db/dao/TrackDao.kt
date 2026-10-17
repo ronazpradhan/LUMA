@@ -1467,6 +1467,19 @@ interface TrackDao {
     fun observeListeningHistory(limit: Int, sinceMs: Long): kotlinx.coroutines.flow.Flow<List<TrackEntity>>
 
     /**
+     * LUMA: every song you have listened to, as YouTube id plus canonical
+     * "artist|title" key, so suggestions can leave out anything you already know.
+     */
+    @Query(
+        """
+        SELECT youtube_id AS youtubeId, canonical_artist AS canonicalArtist, canonical_title AS canonicalTitle
+        FROM tracks
+        WHERE last_played IS NOT NULL OR play_count > 0
+        """
+    )
+    suspend fun getPlayedIdentities(): List<PlayedIdentity>
+
+    /**
      * v0.9.13: Mark a track as saved to Spotify Liked Songs.
      * Called by [LikeDestinationDispatcher] after a successful
      * `PUT /v1/me/tracks` call. Forward-only; once set, never cleared
@@ -2571,3 +2584,6 @@ interface TrackDao {
 
 /** Library totals for the diagnostics bundle. [missingFiles] = downloaded rows whose file is gone. */
 data class TrackDiagnosticsTotals(val total: Int, val downloaded: Int, val missingFiles: Int)
+
+/** LUMA: a played song's identity, for leaving it out of suggestions. */
+data class PlayedIdentity(val youtubeId: String?, val canonicalArtist: String, val canonicalTitle: String)
