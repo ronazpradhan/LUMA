@@ -869,7 +869,6 @@ class MusicRepositoryImpl @Inject constructor(
     }
 
     override suspend fun removePlaylist(playlist: Playlist) {
-        takeDownSharedLinkIfOwned(playlist.id)
         // A playlist that downloads its songs takes its downloads that haven't started
         // with it, now (#532): the queue has no link to playlists, and an unfollowed mix
         // still downloading would otherwise leave its songs listed as queued until the
@@ -892,21 +891,6 @@ class MusicRepositoryImpl @Inject constructor(
     private suspend fun downloadsItsSongs(playlistId: Long): Boolean {
         val playlist = playlistDao.getById(playlistId) ?: return false
         return playlist.keepOffline || (playlist.syncEnabled && playlist.sourceId.startsWith("share:"))
-    }
-
-    /**
-     * The shared_mixes row (and its edit key) cascades away with the playlist, so an owned, still
-     * active share must queue its server DELETE first or the link stays live forever. Followers
-     * never qualify: unfollowing must not take the owner's mix down.
-     */
-    private suspend fun takeDownSharedLinkIfOwned(playlistId: Long) {
-        val row = sharedMixDao.forPlaylist(playlistId) ?: return
-        val key = row.editKey ?: return
-        if (row.role == com.luma.core.data.db.entity.SharedMixEntity.ROLE_OWNER &&
-            row.status == com.luma.core.data.db.entity.SharedMixEntity.STATUS_ACTIVE
-        ) {
-            com.luma.core.data.share.SharedMixUnshareWorker.enqueue(context, row.shareId, key)
-        }
     }
 
     override suspend fun updatePlaylistArtUrl(playlistId: Long, artUrl: String?) {
@@ -1003,9 +987,6 @@ class MusicRepositoryImpl @Inject constructor(
         // or the Library card lies ("1 tracks" but the detail shows 4).
         val count = trackDao.getByPlaylist(playlistId, includeStreamable = true).first().size
         playlistDao.updateTrackCount(playlistId, count)
-        if (sharedMixDao.forPlaylist(playlistId)?.role == com.luma.core.data.db.entity.SharedMixEntity.ROLE_OWNER) {
-            com.luma.core.data.share.SharedMixPublishWorker.enqueue(context, delaySeconds = 30)
-        }
     }
 
     override suspend fun addTracksToPlaylist(trackIds: List<Long>, playlistId: Long) {
@@ -1055,9 +1036,6 @@ class MusicRepositoryImpl @Inject constructor(
         // or the Library card lies ("1 tracks" but the detail shows 4).
         val count = trackDao.getByPlaylist(playlistId, includeStreamable = true).first().size
         playlistDao.updateTrackCount(playlistId, count)
-        if (sharedMixDao.forPlaylist(playlistId)?.role == com.luma.core.data.db.entity.SharedMixEntity.ROLE_OWNER) {
-            com.luma.core.data.share.SharedMixPublishWorker.enqueue(context, delaySeconds = 30)
-        }
     }
 
     override fun getUserCreatedPlaylists(): Flow<List<com.luma.core.model.Playlist>> =
@@ -1110,10 +1088,6 @@ class MusicRepositoryImpl @Inject constructor(
         fromPlaylistId: Long,
         alsoBlacklist: Boolean,
     ): MusicRepository.CascadeRemovalSummary {
-        // Shared mixes (spec §5): at the top, before the early returns below. The job waits 30 s.
-        if (sharedMixDao.forPlaylist(fromPlaylistId)?.role == com.luma.core.data.db.entity.SharedMixEntity.ROLE_OWNER) {
-            com.luma.core.data.share.SharedMixPublishWorker.enqueue(context, delaySeconds = 30)
-        }
         // v0.9.15: explicit-block override. If the user ticked "Block this
         // track" on the delete dialog, that intent always wins — we tear
         // down the file + every cross-ref + insert the blocklist entry,
@@ -1216,7 +1190,6 @@ class MusicRepositoryImpl @Inject constructor(
         // have already been handled per-track above; this just clears the
         // container row. Uses the existing remove path for consistency.
         playlistDao.getById(playlistId)?.let {
-            takeDownSharedLinkIfOwned(playlistId)
             playlistDao.delete(it)
         }
 

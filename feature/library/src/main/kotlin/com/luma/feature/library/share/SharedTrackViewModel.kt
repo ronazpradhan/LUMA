@@ -5,8 +5,6 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.luma.core.data.repository.MusicRepository
-import com.luma.core.data.share.ShareApiClient
-import com.luma.core.data.share.ShareResult
 import com.luma.core.data.social.LikeCoordinator
 import com.luma.core.media.PlayerRepository
 import com.luma.core.model.share.ShareLinks
@@ -15,7 +13,6 @@ import com.luma.core.model.share.toTrack
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlin.coroutines.cancellation.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -35,17 +32,12 @@ class SharedTrackViewModel @Inject constructor(
     private val musicRepository: MusicRepository,
     private val playerRepository: PlayerRepository,
     private val likeCoordinator: LikeCoordinator,
-    private val shareApi: ShareApiClient,
 ) : ViewModel() {
-    /**
-     * Parsed from the route's link, so the card survives process death. A long link carries the song itself;
-     * a short one (`/t/{id}`) only its id, so the song is fetched.
-     */
+    /** Parsed from the route's link, so the card survives process death. The link carries the song itself. */
     private val parsed = ShareLinks.parse(savedStateHandle.get<String>("link"))
     private val _state = MutableStateFlow(
         when (parsed) {
             is ShareLinks.Parsed.Track -> SharedTrackUiState.Loaded(parsed.track)
-            is ShareLinks.Parsed.TrackRef -> SharedTrackUiState.Loading
             else -> SharedTrackUiState.Error("This link has expired. Open it again.", retryable = false)
         },
     )
@@ -56,34 +48,8 @@ class SharedTrackViewModel @Inject constructor(
     /** A short error from the last action, shown on the card. */
     val message: StateFlow<String?> = _message
 
-    init {
-        load()
-    }
-
-    /** Fetches a short link's song; Retry calls it again. A long link has nothing to fetch. */
-    fun load() {
-        val id = (parsed as? ShareLinks.Parsed.TrackRef)?.id ?: return
-        _state.value = SharedTrackUiState.Loading
-        viewModelScope.launch {
-            _state.value = try {
-                // A link made moments ago in another region can 404 until KV catches up (up to ~60 s), so a
-                // 404 gets one more look before the card says the link doesn't exist.
-                val first = shareApi.getTrack(id)
-                val r = if (first == ShareResult.NotFound) { delay(NOT_FOUND_RETRY_MS); shareApi.getTrack(id) } else first
-                when (r) {
-                    is ShareResult.Ok -> SharedTrackUiState.Loaded(r.value)
-                    ShareResult.NotFound, ShareResult.Gone, is ShareResult.Rejected ->
-                        SharedTrackUiState.Error("This song link doesn't exist.", retryable = false)
-                    else -> SharedTrackUiState.Error(RETRY_MESSAGE, retryable = true)
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "load ${ShareLinks.logId(id)} failed", e)
-                SharedTrackUiState.Error(RETRY_MESSAGE, retryable = true)
-            }
-        }
-    }
+    /** The song is inside the link, so there is never anything to fetch; kept for the card's Retry. */
+    fun load() = Unit
 
     fun play() = safely("play") { track ->
         val id = musicRepository.ensureTrackPersisted(track.toTrack())
@@ -125,7 +91,5 @@ class SharedTrackViewModel @Inject constructor(
 
     private companion object {
         const val TAG = "SharedTrackVM"
-        const val RETRY_MESSAGE = "Couldn't load this song. Check your connection and try again."
-        const val NOT_FOUND_RETRY_MS = 2_000L
     }
 }

@@ -140,14 +140,13 @@ class ListenTogetherSession(
         val upcoming = mine.upcoming.take(MAX_QUEUE).mapNotNull { catalog.sharedTrackFor(it) }
         // The song kept playing through the create call and the lookups: read where it is now.
         pendingLoad = first?.let { f -> { ClientMessage.Load(f, player.positionMs, upcoming) } }
-        // Built from the code, like a listener's: a room made on the old workers.dev host (stashfm.app unreachable)
-        // still gets a stashfm.app invite.
-        enter(created.code, ShareLinks.roomUrl(created.code), name, hostKey = created.hostKey, asHost = true)
+        // LUMA: there is no room server, so no session ever gets this far, and no invite link exists.
+        enter(created.code, "", name, hostKey = created.hostKey, asHost = true)
     }
 
     private suspend fun join(code: String) {
         controller.publish(ListenTogetherState.Connecting(hosting = false))
-        enter(code, ShareLinks.roomUrl(code), displayName(), hostKey = null, asHost = false)
+        enter(code, "", displayName(), hostKey = null, asHost = false)
     }
 
     private suspend fun enter(code: String, url: String, name: String?, hostKey: String?, asHost: Boolean) {

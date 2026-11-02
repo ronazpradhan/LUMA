@@ -1,8 +1,8 @@
 package com.luma.feature.library.share
 
-import android.text.format.DateUtils
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -20,7 +20,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -28,9 +27,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -48,7 +44,7 @@ import com.luma.core.model.share.ShareConfig
 fun SharedMixScreen(
     onBack: () -> Unit,
     onOpenPlaylist: (Long) -> Unit,
-    /** Follow / Save a copy: opens the new playlist in place of this screen. */
+    /** Save to library: opens the new playlist in place of this screen. */
     onJoinedPlaylist: (Long) -> Unit = onOpenPlaylist,
     viewModel: SharedMixViewModel = hiltViewModel(),
 ) {
@@ -56,49 +52,26 @@ fun SharedMixScreen(
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
         when (val s = state) {
-            SharedMixUiState.Loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             is SharedMixUiState.Error -> Column(
                 Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(s.message, style = MaterialTheme.typography.titleMedium)
-                if (s.retryable) { Spacer(Modifier.height(16.dp)); Button(onClick = viewModel::load) { Text("Retry") } }
             }
             is SharedMixUiState.Loaded -> LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
                 item {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        // Docs stored before the Worker allowlist may carry any host: never load an off-list one.
-                        s.doc.covers.firstOrNull(ShareConfig::isAllowedCover)?.let {
-                            AsyncImage(it, null, Modifier.size(96.dp).clip(RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop)
-                            Spacer(Modifier.size(16.dp))
-                        }
+                        SharedCover(s.doc.covers, s.doc.tracks.firstNotNullOfOrNull { it.youtubeId })
+                        Spacer(Modifier.size(16.dp))
                         Column {
                             Text(s.doc.name, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             val by = s.doc.sharedBy?.let { " · shared by $it" }.orEmpty()
-                            val updated = s.doc.updatedAt.takeIf { it > 0 }?.let {
-                                val now = System.currentTimeMillis()
-                                if (now - it * 1000 < DateUtils.MINUTE_IN_MILLIS) " · updated just now"
-                                else " · updated " + DateUtils.getRelativeTimeSpanString(it * 1000, now, DateUtils.MINUTE_IN_MILLIS)
-                            }.orEmpty()
-                            Text("${pluralize(s.doc.tracks.size, "track")}$by$updated", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("${pluralize(s.doc.tracks.size, "track")}$by", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                     Spacer(Modifier.height(16.dp))
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = viewModel::play, enabled = !s.busy) { Text("Play") }
-                        when {
-                            s.isOwnMix -> Text("This is your mix", Modifier.align(Alignment.CenterVertically))
-                            s.followedPlaylistId != null -> {
-                                OutlinedButton(onClick = { onOpenPlaylist(s.followedPlaylistId) }) { Text("Following") }
-                                var confirmUnfollow by remember { mutableStateOf(false) }
-                                OutlinedButton(onClick = { if (confirmUnfollow) viewModel.unfollow() else confirmUnfollow = true }, enabled = !s.busy) {
-                                    Text(if (confirmUnfollow) "Tap again to unfollow" else "Unfollow")
-                                }
-                            }
-                            else -> {
-                                Button(onClick = { viewModel.follow(onJoinedPlaylist) }, enabled = !s.busy) { Text("Follow") }
-                                OutlinedButton(onClick = { viewModel.saveCopy(onJoinedPlaylist) }, enabled = !s.busy) { Text("Save a copy") }
-                            }
-                        }
+                        OutlinedButton(onClick = { viewModel.saveCopy(onJoinedPlaylist) }, enabled = !s.busy) { Text("Save to library") }
                     }
                     s.message?.let {
                         Spacer(Modifier.height(8.dp))
@@ -114,5 +87,28 @@ fun SharedMixScreen(
                 }
             }
         }
+    }
+}
+
+/**
+ * The shared playlist's picture: its own cover, or four song covers as a 2x2 mosaic (as the link
+ * carries them), else the first song's YouTube thumbnail. Off-list hosts never load.
+ */
+@Composable
+private fun SharedCover(covers: List<String>, firstVideo: String?) {
+    val shape = RoundedCornerShape(12.dp)
+    val safe = covers.filter(ShareConfig::isAllowedCover)
+    val box = Modifier.size(96.dp).clip(shape)
+    when {
+        safe.size >= 4 -> Column(box) {
+            for (row in 0..1) Row(Modifier.weight(1f)) {
+                for (col in 0..1) {
+                    AsyncImage(safe[row * 2 + col], null, Modifier.weight(1f).fillMaxSize(), contentScale = ContentScale.Crop)
+                }
+            }
+        }
+        safe.isNotEmpty() -> AsyncImage(safe.first(), null, box, contentScale = ContentScale.Crop)
+        firstVideo != null -> AsyncImage("https://i.ytimg.com/vi/$firstVideo/hqdefault.jpg", null, box, contentScale = ContentScale.Crop)
+        else -> Box(box.background(MaterialTheme.colorScheme.surfaceVariant))
     }
 }

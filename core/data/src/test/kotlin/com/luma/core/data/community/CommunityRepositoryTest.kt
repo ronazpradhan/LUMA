@@ -8,7 +8,6 @@ import com.luma.core.data.db.entity.PlaylistEntity
 import com.luma.core.data.db.entity.PlaylistTrackCrossRef
 import com.luma.core.data.db.entity.TrackEntity
 import com.luma.core.data.prefs.HomeSectionsPreference
-import com.luma.core.data.share.ShareApiClient
 import com.luma.core.data.share.SharePreference
 import com.luma.core.data.share.SharedMixRepository
 import com.luma.core.model.MusicSource
@@ -51,7 +50,7 @@ class CommunityRepositoryTest {
         val base = server.url("/").toString().removeSuffix("/")
         shared = SharedMixRepository(
             db, db.sharedMixDao(), db.playlistDao(), db.trackDao(), mockk(relaxed = true),
-            ShareApiClient(OkHttpClient()).apply { baseUrls = listOf(base) }, ApplicationProvider.getApplicationContext(),
+            ApplicationProvider.getApplicationContext(),
         )
         repo = repository(keyStore(existingKey = key))
     }

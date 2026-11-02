@@ -118,8 +118,9 @@ class HomeSectionsPreference @Inject constructor(
     }.distinctUntilChanged().catch { emit(emptySet()) }
 
     /** Community's own switch (spec 2026-09-26 §3): off until turned on in Settings ▸ Home layout. */
-    val communityOn: Flow<Boolean> = context.homeSectionsDataStore.data.map { prefs ->
-        prefs[communityOnKey] ?: false
+    // LUMA: Community lived on Stash's share server; LUMA has no server, so it is always off.
+    val communityOn: Flow<Boolean> = context.homeSectionsDataStore.data.map { _ ->
+        false
     }.distinctUntilChanged().catch { emit(false) }
 
     // Open LUMA on (#428) lives in SharedPreferences, not the DataStore: launch reads it
@@ -149,7 +150,7 @@ class HomeSectionsPreference @Inject constructor(
      */
     val visibleSections: Flow<List<HomeSection>> = context.homeSectionsDataStore.data.map { prefs ->
         val hiddenSet = prefs[hiddenKey].toKeys().mapNotNull(HomeSection::fromKey).toSet()
-        visibleHomeSections(resolveHomeSectionOrder(prefs[orderKey].toKeys()), hiddenSet, prefs[communityOnKey] ?: false)
+        visibleHomeSections(resolveHomeSectionOrder(prefs[orderKey].toKeys()), hiddenSet, communityOn = false)
     }.distinctUntilChanged().catch { emit(DEFAULT_HOME_SECTIONS) }
 
     /** Swap [section] one slot up or down in the full order. */
@@ -184,7 +185,7 @@ class HomeSectionsPreference @Inject constructor(
             if (on && prefs[communityOnKey] == null) {
                 prefs[orderKey] = withCommunityFirst(resolveHomeSectionOrder(prefs[orderKey].toKeys())).joinToString(",") { it.key }
             }
-            prefs[communityOnKey] = on
+            prefs[communityOnKey] = false // LUMA: never on (no server)
         }
     }
 

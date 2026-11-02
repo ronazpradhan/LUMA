@@ -25,7 +25,6 @@ import com.luma.core.data.db.entity.TrackEntity
 import com.luma.core.data.mapper.toDomain
 import com.luma.core.data.prefs.DownloadNetworkPreference
 import com.luma.core.data.prefs.StreamingPreference
-import com.luma.core.data.share.ShareApiClient
 import com.luma.core.data.share.SharedMixRepository
 import com.luma.core.data.sync.SingleTrackDownloadEnqueuer
 import com.luma.core.data.sync.SyncPreferences
@@ -502,7 +501,7 @@ class MusicRepositoryQueuePlaylistTest {
         val song = member(mix, 0, track("Waiting"))
         db.downloadQueueDao().insert(DownloadQueueEntity(trackId = song, searchQuery = "A - Waiting"))
         val shares = SharedMixRepository(
-            db, db.sharedMixDao(), db.playlistDao(), db.trackDao(), repo(), ShareApiClient(OkHttpClient()), context,
+            db, db.sharedMixDao(), db.playlistDao(), db.trackDao(), repo(), context,
         )
 
         shares.unfollow(mix)

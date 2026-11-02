@@ -25,7 +25,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
@@ -36,19 +35,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.luma.core.model.Track
 import com.luma.core.model.share.ShareLinks
-import com.luma.core.model.share.SharedTrack
-import com.luma.core.model.share.toSharedTrackWithArt
+import com.luma.core.model.share.toSharedTrack
 import com.luma.core.ui.theme.LumaTheme
-import kotlin.coroutines.cancellation.CancellationException
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
-
-/**
- * Makes a short song link (`https://stashfm.app/t/{id}`) on the share Worker, or returns null when it couldn't.
- * The app provides it once at its root, since core:ui can't see the network client; without it (previews,
- * tests) "LUMA link" shares the long link.
- */
-val LocalCreateTrackLink = staticCompositionLocalOf<(suspend (SharedTrack) -> String?)?> { null }
 
 /**
  * Fork issue ParaliyzedEvo/LUMA#40: share the song as a link your friends
@@ -68,9 +56,6 @@ fun ShareTrackSheet(
     val artist = track.artist
     val spotifyUrl = spotifyShareUrl(track.spotifyUri)
     val youtubeUrl = youtubeShareUrl(track.youtubeId)
-    val createLink = LocalCreateTrackLink.current
-    val scope = rememberCoroutineScope()
-    var linking by remember { mutableStateOf(false) }
 
     fun send(text: String) {
         val intent = Intent(Intent.ACTION_SEND).apply {
@@ -113,17 +98,8 @@ fun ShareTrackSheet(
         ShareRow(
             label = "LUMA link",
             tint = MaterialTheme.colorScheme.primary,
-            busy = linking,
             onClick = {
-                linking = true
-                // Closing the sheet mid-wait cancels this with it, and nothing is shared.
-                scope.launch {
-                    try {
-                        send("$artist — $title\n${lumaSongLink(track, createLink)}")
-                    } finally {
-                        linking = false
-                    }
-                }
+                send("$artist — $title\n${lumaSongLink(track)}")
             },
         )
         if (spotifyUrl != null) {
@@ -188,26 +164,11 @@ private fun ShareRow(
 }
 
 /**
- * The link "LUMA link" shares: the short `/t/{id}` link when [create] makes one within [timeoutMs], otherwise
- * (offline, refused, rate limited, slow, or no [create]) the long `/t?…` link, which needs no server, so sharing
- * always works. Both open in LUMA via App Links; without LUMA, the page shows the song and offers "Get LUMA".
- * Album, length, ISRC and ids go to the server, and the cover only from a known art CDN, never a local file.
+ * The link "LUMA link" shares: the song's title, artist and ids after `#` on playluma.vercel.app. No server
+ * is involved, so sharing always works offline too. It opens in LUMA via App Links; without LUMA, the page
+ * shows the song and offers "Get LUMA".
  */
-suspend fun lumaSongLink(
-    track: Track,
-    create: (suspend (SharedTrack) -> String?)?,
-    timeoutMs: Long = ShareLinks.SHORT_LINK_TIMEOUT_MS,
-): String {
-    val shared = track.toSharedTrackWithArt()
-    val short = if (create == null) null else try {
-        withTimeoutOrNull(timeoutMs) { create(shared) }
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Exception) {
-        null
-    }
-    return short ?: ShareLinks.trackUrl(shared)
-}
+fun lumaSongLink(track: Track): String = ShareLinks.trackUrl(track.toSharedTrack())
 
 /**
  * `spotify:track:ID` (or a full open.spotify.com URL, passed through) →

@@ -209,14 +209,11 @@ fun LumaScaffold(
             null -> Unit
             else -> {
                 if (pendingDeepLink.startsWith(com.luma.app.MainActivity.DEEP_LINK_SHARED_MIX_PREFIX)) {
-                    val id = pendingDeepLink.removePrefix(com.luma.app.MainActivity.DEEP_LINK_SHARED_MIX_PREFIX)
-                    navController.navigate(SharedMixRoute(id))
+                    val link = pendingDeepLink.removePrefix(com.luma.app.MainActivity.DEEP_LINK_SHARED_MIX_PREFIX)
+                    navController.navigate(SharedMixRoute(link))
                 } else if (pendingDeepLink.startsWith(com.luma.app.MainActivity.DEEP_LINK_SHARED_TRACK_PREFIX)) {
                     val link = pendingDeepLink.removePrefix(com.luma.app.MainActivity.DEEP_LINK_SHARED_TRACK_PREFIX)
                     navController.navigate(SharedTrackRoute(link))
-                } else if (pendingDeepLink.startsWith(com.luma.app.MainActivity.DEEP_LINK_LISTEN_PREFIX)) {
-                    val code = pendingDeepLink.removePrefix(com.luma.app.MainActivity.DEEP_LINK_LISTEN_PREFIX)
-                    navController.navigate(ListenJoinRoute(code))
                 }
                 onDeepLinkConsumed() // unknown targets are cleared too, so we don't loop
             }

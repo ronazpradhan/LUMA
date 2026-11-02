@@ -5,9 +5,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -23,28 +21,20 @@ class HomeSectionsCommunityTest {
         context.homeSectionsDataStore.edit { it.clear() }
     }
 
-    @Test fun `off until turned on, the first time it goes to the top, after that it stays where it was put`() = runTest {
+    // LUMA: Community lived on Stash's share server; LUMA has none, so Community never shows.
+    @Test fun `community stays off whatever asks to turn it on`() = runTest {
+        val pref = HomeSectionsPreference(context)
+        assertFalse(pref.communityOn.first())
+        pref.setCommunityOn(true)
+        assertFalse(pref.communityOn.first())
+        assertFalse(HomeSection.COMMUNITY in pref.visibleSections.first())
+    }
+
+    @Test fun `a switch left on by an older version doesn't bring it back`() = runTest {
+        context.homeSectionsDataStore.edit { it[androidx.datastore.preferences.core.booleanPreferencesKey("community_on")] = true }
         val pref = HomeSectionsPreference(context)
         assertFalse(pref.communityOn.first())
         assertFalse(HomeSection.COMMUNITY in pref.visibleSections.first())
-
-        pref.setCommunityOn(true)
-        assertTrue(pref.communityOn.first())
-        assertEquals(HomeSection.COMMUNITY, pref.visibleSections.first().first())
-
-        pref.move(HomeSection.COMMUNITY, up = false)
-        pref.setCommunityOn(false)
-        assertFalse(HomeSection.COMMUNITY in pref.visibleSections.first())
-        pref.setCommunityOn(true)
-        assertEquals(HomeSection.COMMUNITY, pref.visibleSections.first()[1])
     }
 
-    @Test fun `placed by hand before it was ever on, it keeps that spot when turned on`() = runTest {
-        val pref = HomeSectionsPreference(context)
-        pref.move(HomeSection.COMMUNITY, up = true)
-        val placed = pref.order.first()
-
-        pref.setCommunityOn(true)
-        assertEquals(placed, pref.visibleSections.first())
-    }
 }

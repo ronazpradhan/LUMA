@@ -475,8 +475,15 @@ class LumaApplication : Application(), Configuration.Provider {
         // KDoc). KEEP policy means a re-launch before the worker completes
         // doesn't re-enqueue; re-arms after each sync via SyncFinalizeWorker.
         ArtistImageBackfillWorker.enqueueOneTime(this)
-        // Followed shared mixes: check on start, at most every 6 h (the worker gates per mix).
-        com.luma.core.data.share.SharedMixFollowWorker.enqueue(this, force = false)
+        // LUMA: shared mixes no longer sync with Stash's share server. Jobs an older version
+        // scheduled are cancelled, so nothing contacts it after an update.
+        androidx.work.WorkManager.getInstance(this).apply {
+            cancelUniqueWork("stash_shared_mix_follow")
+            cancelUniqueWork("stash_shared_mix_publish")
+            // Every job carries its worker's class name as a tag, including each per-mix unshare.
+            listOf("SharedMixFollowWorker", "SharedMixPublishWorker", "SharedMixUnshareWorker")
+                .forEach { cancelAllWorkByTag("com.luma.core.data.share.$it") }
+        }
         // v0.9.11: kick a background sweep that fills in bit-depth +
         // sample-rate for tracks downloaded before the columns existed.
         // The flag is set immediately on enqueue (not after success) so

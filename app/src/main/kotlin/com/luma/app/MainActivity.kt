@@ -23,15 +23,11 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.luma.app.navigation.LumaScaffold
 import com.luma.core.data.prefs.HomeSectionsPreference
 import com.luma.core.data.prefs.ThemePreference
-import com.luma.core.data.share.ShareApiClient
-import com.luma.core.data.share.ShareResult
 import com.luma.core.model.ThemeMode
 import com.luma.core.model.share.ShareLinks
-import com.luma.core.model.share.SharedTrack
 import com.luma.core.media.listen.ListenTogetherController
 import com.luma.core.media.listen.ListenTogetherState
 import com.luma.core.ui.components.ListenTogetherRole
-import com.luma.core.ui.components.LocalCreateTrackLink
 import com.luma.core.ui.components.LocalListenTogetherRole
 import com.luma.core.ui.theme.LumaTheme
 import com.luma.data.download.files.LocalImportCoordinator
@@ -47,11 +43,8 @@ class MainActivity : ComponentActivity() {
         /** [pendingDeepLink] prefix for a shared-track link; the link (long, or short `/t/{id}`) follows. */
         const val DEEP_LINK_SHARED_TRACK_PREFIX = "shared_track:"
 
-        /** [pendingDeepLink] prefix for a shared-mix link; the share id follows. */
+        /** [pendingDeepLink] prefix for a shared playlist; the whole playlist link follows. */
         const val DEEP_LINK_SHARED_MIX_PREFIX = "shared_mix:"
-
-        /** [pendingDeepLink] prefix for a Listen Together invite; the room code follows. */
-        const val DEEP_LINK_LISTEN_PREFIX = "listen:"
     }
 
     @Inject
@@ -65,20 +58,6 @@ class MainActivity : ComponentActivity() {
 
     @Inject
     lateinit var homeSectionsPreference: HomeSectionsPreference
-
-    @Inject
-    lateinit var shareApiClient: ShareApiClient
-
-    /**
-     * What every song Share sheet's "LUMA link" uses to make a short link (via [LocalCreateTrackLink]). Null on any
-     * failure: the sheet then shares the long link, so sharing still works.
-     */
-    private val createTrackLink: suspend (SharedTrack) -> String? = { track ->
-        when (val r = shareApiClient.createTrackLink(track)) {
-            is ShareResult.Ok -> r.value.url
-            else -> { Log.w("ShareTrack", "short link failed ($r); sharing the long link"); null }
-        }
-    }
 
     /**
      * Pending deep-link target read from the launch / new-intent extras.
@@ -122,7 +101,6 @@ class MainActivity : ComponentActivity() {
             LumaTheme(darkTheme = darkTheme, amoled = amoledDark) {
                 CompositionLocalProvider(
                     LocalListenTogetherRole provides role,
-                    LocalCreateTrackLink provides createTrackLink,
                 ) {
                     LumaScaffold(
                         pendingDeepLink = pendingDeepLink.value,
@@ -160,25 +138,17 @@ class MainActivity : ComponentActivity() {
     private fun handleDeepLinkIntent(intent: Intent?) {
         if (intent == null) return
 
-        // Shared mix / track links (https App Links on stashfm.app or the old workers.dev host, and legacy
-        // LUMA://track). Spec §6.
+        // Shared playlist / song links (https App Links on playluma.vercel.app, and the legacy stash://track).
+        // The whole playlist or song is inside the link: nothing is fetched.
         if (intent.action == Intent.ACTION_VIEW) {
             val handled = when (val parsed = ShareLinks.parse(intent.data?.toString())) {
-                is ShareLinks.Parsed.Mix -> {
-                    pendingDeepLink.value = DEEP_LINK_SHARED_MIX_PREFIX + parsed.shareId
+                is ShareLinks.Parsed.Playlist -> {
+                    val p = parsed.playlist // re-encoded: bounded and normalised
+                    pendingDeepLink.value = DEEP_LINK_SHARED_MIX_PREFIX + ShareLinks.playlistUrl(p.name, p.sharedBy, p.tracks, p.covers)
                     true
                 }
                 is ShareLinks.Parsed.Track -> {
                     pendingDeepLink.value = DEEP_LINK_SHARED_TRACK_PREFIX + ShareLinks.trackUrl(parsed.track) // bounded, normalised
-                    true
-                }
-                is ShareLinks.Parsed.TrackRef -> {
-                    // A short song link: the card fetches the song by its id.
-                    pendingDeepLink.value = DEEP_LINK_SHARED_TRACK_PREFIX + ShareLinks.trackShortUrl(parsed.id)
-                    true
-                }
-                is ShareLinks.Parsed.Room -> {
-                    pendingDeepLink.value = DEEP_LINK_LISTEN_PREFIX + parsed.code
                     true
                 }
                 null -> false

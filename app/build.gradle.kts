@@ -83,8 +83,8 @@ android {
         applicationId = "com.luma.music"
         minSdk = 26
         targetSdk = 35
-        versionCode = 155
-        versionName = "1.3.3"
+        versionCode = 156
+        versionName = "1.4.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // AppAuth redirect scheme removed -- Spotify now uses sp_dc cookie auth
         // Last.fm API credentials exposed via BuildConfig for the app-level

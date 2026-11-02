@@ -1,40 +1,40 @@
 package com.luma.core.model.share
 
+import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.Base64
+import java.util.zip.Deflater
+import java.util.zip.Inflater
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 
-/** Where share links live (spec §1; moved to stashfm.app on 2026-10-03). */
+/**
+ * LUMA: where share links live. There is no share server: a link carries everything in its
+ * fragment (after `#`), which browsers never send anywhere, and playluma.vercel.app is only a
+ * static page that reads it. Nothing LUMA shares is stored by anyone.
+ */
 object ShareConfig {
-    /** Every link the app builds, and the first host every share API call tries (mixes, song links, rooms, Community). */
-    const val BASE_URL = "https://stashfm.app"
-
-    /** Where links lived before stashfm.app. The same Worker and data still answer there, forever. */
-    const val LEGACY_BASE_URL = "https://stash-share.rawnaldclark.workers.dev"
+    /** Every link the app builds. */
+    const val BASE_URL = "https://playluma.vercel.app"
 
     /**
-     * Where share API calls go, in order. The old host is tried only when a request never reached stashfm.app (no
-     * DNS answer, refused, TLS failed): DNS filters often block newly registered domains for weeks. Links are still
-     * built on [BASE_URL], whichever host answered.
+     * Share API hosts: none. Stash's share Worker (stashfm.app) is no longer contacted; this
+     * stays empty so any leftover caller fails at once instead of reaching someone else's server.
      */
-    val API_BASE_URLS: List<String> = listOf(BASE_URL, LEGACY_BASE_URL)
+    val API_BASE_URLS: List<String> = emptyList()
 
-    /**
-     * Hosts whose links open in LUMA: stashfm.app, and the workers.dev host older links use. Keep in sync with the
-     * App Links filter in app/src/main/AndroidManifest.xml.
-     */
-    val HOSTS: Set<String> = API_BASE_URLS.mapTo(LinkedHashSet()) { it.removePrefix("https://") }
+    /** Hosts whose links open in LUMA. Keep in sync with the App Links filter in app/src/main/AndroidManifest.xml. */
+    val HOSTS: Set<String> = setOf("playluma.vercel.app")
 
-    /**
-     * Album-art CDNs a shared mix's or song's covers may point at. Anything else could log recipients' IPs.
-     * Keep in sync with COVER_HOSTS in infra/share-worker/src/validate.js.
-     */
+    /** Album-art CDNs a shared song's cover may point at. Anything else could log recipients' IPs. */
     val COVER_HOSTS: List<String> = listOf(
         "i.scdn.co", "mosaic.scdn.co",
         "i.ytimg.com", "lh3.googleusercontent.com", "yt3.googleusercontent.com", "yt3.ggpht.com",
         "lastfm.freetls.fastly.net", "lastfm-img.freetls.fastly.net",
         "static.qobuz.com", "c.saavncdn.com",
-        // Deezer: where the Worker finds a song page's cover by ISRC.
         "cdn-images.dzcdn.net", "e-cdns-images.dzcdn.net",
     )
 
@@ -46,45 +46,58 @@ object ShareConfig {
     }
 }
 
+/** A playlist as a link carries it: short keys keep the link small. */
+@Serializable
+data class LinkPlaylist(
+    @SerialName("v") val v: Int = 1,
+    @SerialName("n") val name: String,
+    @SerialName("by") val sharedBy: String? = null,
+    @SerialName("t") val tracks: List<SharedTrack>,
+    /**
+     * The playlist's picture: one web cover (its own), or up to four song covers shown as a 2x2
+     * mosaic. Only https links on [ShareConfig.COVER_HOSTS], so a link can't make its readers load
+     * images from anywhere else; a photo from the phone's gallery can't travel without a server.
+     */
+    @SerialName("c") val covers: List<String> = emptyList(),
+)
+
 object ShareLinks {
     sealed interface Parsed {
-        data class Mix(val shareId: String) : Parsed
+        /** A whole playlist, decoded from the link itself. */
+        data class Playlist(val playlist: LinkPlaylist) : Parsed
         data class Track(val track: SharedTrack) : Parsed
-
-        /** A short song link, `https://…/t/{id}`: the song itself is on the share Worker (`GET /v1/tracks/{id}`). */
-        data class TrackRef(val id: String) : Parsed
-
-        /** A Listen Together invite, `https://…/l/{code}` (spec 2026-09-24 §5). */
-        data class Room(val code: String) : Parsed
     }
 
-    private val ID = Regex("^[A-Za-z0-9]{8}$")
+    /** Songs a playlist link carries at most; longer playlists share their first ones. */
+    const val MAX_LINK_TRACKS = 500
 
-    /** 8 of the Worker's 32 room-code symbols (no 0/O, 1/I). Keep in sync with ROOM_API in infra/share-worker/src/index.js. */
-    private val ROOM_CODE = Regex("^[A-HJ-NP-Z2-9]{8}$")
+    /** Covers a playlist link carries: its own, or four songs' for a mosaic. */
+    const val MAX_COVERS = 4
 
-    /** A share id for logs: the id is the only secret a link has, so logs show just a prefix. */
-    fun logId(shareId: String): String = shareId.take(3) + "…"
+    /** Bytes a decoded playlist may take, so a hostile link can't exhaust memory. */
+    private const val MAX_PLAYLIST_JSON = 2_000_000
 
-    fun mixUrl(shareId: String): String = "${ShareConfig.BASE_URL}/m/$shareId"
-
-    fun roomUrl(code: String): String = "${ShareConfig.BASE_URL}/l/$code"
+    private val json = Json { ignoreUnknownKeys = true; explicitNulls = false; encodeDefaults = false }
 
     /**
-     * How long Share → "LUMA link" waits for `POST /v1/tracks` before it shares the long link instead.
-     * The share sheet's time box and the request's own call timeout both use it.
+     * The link for a playlist: its name, who shared it and its songs, as raw-DEFLATE JSON in
+     * base64url after `#`. Only what finds each song again is kept (no covers).
      */
-    const val SHORT_LINK_TIMEOUT_MS = 4_000L
+    fun playlistUrl(name: String, sharedBy: String?, tracks: List<SharedTrack>, covers: List<String> = emptyList()): String {
+        val payload = LinkPlaylist(
+            name = name.trim().take(100).ifEmpty { "Playlist" },
+            sharedBy = sharedBy?.trim()?.take(40)?.ifEmpty { null },
+            tracks = tracks.take(MAX_LINK_TRACKS).map { it.copy(addedBy = null, artUrl = null) },
+            covers = cleanCovers(covers),
+        )
+        val bytes = json.encodeToString(LinkPlaylist.serializer(), payload).toByteArray(Charsets.UTF_8)
+        return "${ShareConfig.BASE_URL}/p#" + Base64.getUrlEncoder().withoutPadding().encodeToString(deflate(bytes))
+    }
 
-    /** The short song link for an id the Worker's `POST /v1/tracks` returned. */
-    fun trackShortUrl(id: String): String = "${ShareConfig.BASE_URL}/t/$id"
-
-    /** An id the Worker hands out for mixes and short song links: 8 letters or digits. */
-    fun isShareId(id: String): Boolean = ID.matches(id)
-
+    /** The link for one song: its fields as a query after `#`. */
     fun trackUrl(t: SharedTrack): String = buildString {
         fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
-        append(ShareConfig.BASE_URL).append("/t?t=").append(enc(t.title)).append("&a=").append(enc(t.artist))
+        append(ShareConfig.BASE_URL).append("/s#t=").append(enc(t.title)).append("&a=").append(enc(t.artist))
         t.album?.let { append("&al=").append(enc(it)) }
         t.durationMs?.let { append("&d=").append(it) }
         t.isrc?.let { append("&isrc=").append(enc(it)) }
@@ -92,30 +105,54 @@ object ShareLinks {
         t.youtubeId?.let { append("&yt=").append(enc(it)) }
     }
 
-    /** A share link (https mix/track/room, short or long song link, or the legacy `LUMA://track`), or null when it isn't one. */
+    /** A LUMA share link (https or `luma://`, playlist or song, or the legacy `stash://track`), or null when it isn't one. */
     fun parse(link: String?): Parsed? {
         if (link == null) return null
         // Links arrive from any app or page, so nothing here may throw.
-        val (uri, q) = runCatching { URI(link).let { it to query(it.rawQuery) } }.getOrNull() ?: return null
+        val uri = runCatching { URI(link) }.getOrNull() ?: return null
         val scheme = uri.scheme?.lowercase()
         val host = uri.host?.lowercase()
         val path = uri.path.orEmpty().trimEnd('/')
         return when {
-            scheme == "https" && host in ShareConfig.HOSTS -> when {
-                path.startsWith("/m/") -> path.removePrefix("/m/").takeIf { ID.matches(it) }?.let { Parsed.Mix(it) }
-                path.startsWith("/l/") -> path.removePrefix("/l/").uppercase().takeIf { ROOM_CODE.matches(it) }?.let { Parsed.Room(it) }
-                path.startsWith("/t/") -> path.removePrefix("/t/").takeIf { ID.matches(it) }?.let { Parsed.TrackRef(it) }
-                path == "/t" -> trackFrom(q["t"], q["a"], q["al"], q["d"], q["isrc"], q["sp"], q["yt"])
+            scheme == "https" && host in ShareConfig.HOSTS -> when (path) {
+                "/p" -> uri.rawFragment?.let(::playlistFrom)
+                "/s" -> runCatching { query(uri.rawFragment) }.getOrNull()?.let { q ->
+                    trackFrom(q["t"], q["a"], q["al"], q["d"], q["isrc"], q["sp"], q["yt"])
+                }
                 else -> null
             }
-            scheme == "stash" && host == "track" ->
+            // The website's "Open in LUMA" button: the same links on LUMA's own scheme, which browsers hand
+            // to the app with the fragment intact (an https link to the page they're on would just reload it).
+            scheme == "luma" && host == "p" -> uri.rawFragment?.let(::playlistFrom)
+            scheme == "luma" && host == "s" -> runCatching { query(uri.rawFragment) }.getOrNull()?.let { q ->
+                trackFrom(q["t"], q["a"], q["al"], q["d"], q["isrc"], q["sp"], q["yt"])
+            }
+            scheme == "stash" && host == "track" -> runCatching { query(uri.rawQuery) }.getOrNull()?.let { q ->
                 trackFrom(q["t"], q["a"], null, null, null, spotifyTrackId(q["s"]), q["y"])
+            }
             else -> null
         }
     }
 
+    private fun playlistFrom(fragment: String): Parsed? = runCatching {
+        val bytes = inflate(Base64.getUrlDecoder().decode(fragment.trimEnd('=')), MAX_PLAYLIST_JSON) ?: return null
+        val p = json.decodeFromString(LinkPlaylist.serializer(), bytes.toString(Charsets.UTF_8))
+        if (p.v > 1) return null
+        val tracks = p.tracks.take(MAX_LINK_TRACKS).mapNotNull { t ->
+            (trackFrom(t.title, t.artist, t.album, t.durationMs?.toString(), t.isrc, t.spotifyId, t.youtubeId) as? Parsed.Track)?.track
+        }
+        val name = p.name.trim().take(100).ifEmpty { "Playlist" }
+        Parsed.Playlist(
+            LinkPlaylist(name = name, sharedBy = p.sharedBy?.trim()?.take(40)?.ifEmpty { null }, tracks = tracks, covers = cleanCovers(p.covers)),
+        )
+    }.getOrNull()
+
+    /** At most [MAX_COVERS] distinct, short https covers on the allowed hosts. */
+    private fun cleanCovers(covers: List<String>): List<String> =
+        covers.map { it.trim() }.filter { it.length <= 500 && ShareConfig.isAllowedCover(it) }.distinct().take(MAX_COVERS)
+
     private fun trackFrom(t: String?, a: String?, al: String?, d: String?, isrc: String?, sp: String?, yt: String?): Parsed? {
-        // Same caps as the Worker's validator: a hostile link can't push huge strings into the DB.
+        // Bounded: a hostile link can't push huge strings into the database.
         fun String?.field(max: Int) = this?.trim()?.take(max)?.ifEmpty { null }
         val title = t.field(500) ?: return null
         val artist = a.field(500) ?: return null
@@ -130,4 +167,34 @@ object ShareLinks {
             val (k, v) = part.split('=', limit = 2)
             URLDecoder.decode(k, "UTF-8") to URLDecoder.decode(v, "UTF-8")
         }
+
+    private fun deflate(input: ByteArray): ByteArray {
+        val d = Deflater(Deflater.BEST_COMPRESSION, true)
+        d.setInput(input)
+        d.finish()
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(4096)
+        while (!d.finished()) out.write(buf, 0, d.deflate(buf))
+        d.end()
+        return out.toByteArray()
+    }
+
+    /** Raw inflate, refusing anything that grows past [limit] bytes (a zip bomb in a link). */
+    private fun inflate(input: ByteArray, limit: Int): ByteArray? {
+        val i = Inflater(true)
+        return try {
+            i.setInput(input)
+            val out = ByteArrayOutputStream()
+            val buf = ByteArray(4096)
+            while (!i.finished()) {
+                val n = i.inflate(buf)
+                if (n == 0 && (i.needsInput() || i.needsDictionary())) break
+                out.write(buf, 0, n)
+                if (out.size() > limit) return null
+            }
+            out.toByteArray()
+        } finally {
+            i.end()
+        }
+    }
 }

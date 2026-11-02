@@ -483,7 +483,7 @@ private fun LumaNavGraph(
             com.luma.feature.library.share.SharedMixScreen(
                 onBack = { navController.popBackStack() },
                 onOpenPlaylist = { id -> navController.navigate(PlaylistDetailRoute(id)) },
-                // Follow / Save a copy land on the new playlist; Back skips the mix screen.
+                // Save to library lands on the new playlist; Back skips the shared playlist screen.
                 onJoinedPlaylist = { id ->
                     navController.navigate(PlaylistDetailRoute(id)) { popUpTo<SharedMixRoute> { inclusive = true } }
                 },
@@ -519,19 +519,6 @@ private fun LumaNavGraph(
             )
         }
 
-        screen<ListenJoinRoute> {
-            com.luma.feature.nowplaying.listen.JoinSessionScreen(
-                onBack = { navController.popBackStack() },
-                // After joining, Now Playing is the session; Back from it skips the Join screen. Reuse an
-                // existing Now Playing entry rather than stack a second one (as the mini player does).
-                onJoined = {
-                    navController.popBackStack<ListenJoinRoute>(inclusive = true)
-                    if (!navController.popBackStack(NowPlayingRoute, inclusive = false)) {
-                        navController.navigate(NowPlayingRoute) { launchSingleTop = true }
-                    }
-                },
-            )
-        }
 
         screen<ArtistDetailRoute> {
             ArtistDetailScreen(

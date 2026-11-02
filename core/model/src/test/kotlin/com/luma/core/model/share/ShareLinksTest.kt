@@ -1,21 +1,72 @@
 package com.luma.core.model.share
 
 import com.google.common.truth.Truth.assertThat
+import java.util.Base64
+import java.util.zip.Deflater
 import org.junit.Test
 
 class ShareLinksTest {
     private val base = ShareConfig.BASE_URL
 
-    @Test fun `mix url and parse round-trip`() {
-        assertThat(ShareLinks.mixUrl("Kx7Qa2pL")).isEqualTo("$base/m/Kx7Qa2pL")
-        assertThat(ShareLinks.parse("$base/m/Kx7Qa2pL")).isEqualTo(ShareLinks.Parsed.Mix("Kx7Qa2pL"))
+    @Test fun `links live on LUMA's site and no share server is contacted`() {
+        assertThat(base).isEqualTo("https://playluma.vercel.app")
+        assertThat(ShareConfig.API_BASE_URLS).isEmpty()
+        assertThat(ShareConfig.HOSTS).containsExactly("playluma.vercel.app")
     }
 
-    @Test fun `track url carries every field and parses back`() {
+    @Test fun `a playlist travels whole inside its link and comes back the same`() {
+        val songs = listOf(
+            SharedTrack("Song & Dance", "Aphex Twin", "Drukqs", 125_000, "GBBPW0100025", "abc", "xyz12345678"),
+            SharedTrack("Teardrop", "Massive Attack", youtubeId = "u7K72X4eo_s"),
+        )
+        val url = ShareLinks.playlistUrl("Night drive", "Ronaz", songs)
+        assertThat(url).startsWith("$base/p#")
+        assertThat(url).doesNotContain("Night") // compressed, not readable text
+        val parsed = ShareLinks.parse(url) as ShareLinks.Parsed.Playlist
+        assertThat(parsed.playlist.name).isEqualTo("Night drive")
+        assertThat(parsed.playlist.sharedBy).isEqualTo("Ronaz")
+        assertThat(parsed.playlist.tracks).isEqualTo(songs)
+    }
+
+    @Test fun `covers and Listen Together fields stay out of playlist links, and long playlists are capped`() {
+        val many = (1..600).map { SharedTrack("Song $it", "Artist", artUrl = "https://i.ytimg.com/vi/x/a.jpg", addedBy = "m1") }
+        val parsed = ShareLinks.parse(ShareLinks.playlistUrl("Big", null, many)) as ShareLinks.Parsed.Playlist
+        assertThat(parsed.playlist.tracks).hasSize(ShareLinks.MAX_LINK_TRACKS)
+        assertThat(parsed.playlist.tracks.all { it.artUrl == null && it.addedBy == null }).isTrue()
+    }
+
+    @Test fun `a hundred-song playlist makes a link that fits in a message`() {
+        val songs = (1..100).map { SharedTrack("Some Song Title $it", "Some Artist $it", "Album $it", 200_000L + it, youtubeId = "abcdefgh${it % 10}xy") }
+        assertThat(ShareLinks.playlistUrl("Mine", null, songs).length).isLessThan(8_000)
+    }
+
+    @Test fun `a playlist's picture travels as up to four covers, from known image hosts only`() {
+        val covers = listOf(
+            "https://i.scdn.co/image/a", "https://evil.example/track.gif", "https://i.scdn.co/image/a",
+            "http://i.ytimg.com/vi/x/hq.jpg", "https://i.ytimg.com/vi/b/hq.jpg", "https://lh3.googleusercontent.com/c",
+            "https://c.saavncdn.com/d.jpg", "https://i.scdn.co/image/e",
+        )
+        val p = (ShareLinks.parse(ShareLinks.playlistUrl("Pics", null, listOf(SharedTrack("T", "A")), covers)) as ShareLinks.Parsed.Playlist).playlist
+        assertThat(p.covers).containsExactly(
+            "https://i.scdn.co/image/a", "https://i.ytimg.com/vi/b/hq.jpg", "https://lh3.googleusercontent.com/c", "https://c.saavncdn.com/d.jpg",
+        ).inOrder()
+    }
+
+    @Test fun `a song link carries every field after the hash and parses back`() {
         val t = SharedTrack("Song & Dance", "Aphex Twin", "Drukqs", 125_000, "GBBPW0100025", "abc", "xyz")
         val url = ShareLinks.trackUrl(t)
-        assertThat(url).startsWith("$base/t?t=Song+%26+Dance&a=Aphex+Twin")
+        assertThat(url).startsWith("$base/s#t=Song+%26+Dance&a=Aphex+Twin")
         assertThat(ShareLinks.parse(url)).isEqualTo(ShareLinks.Parsed.Track(t))
+    }
+
+    @Test fun `the website's Open in LUMA links carry the same playlist or song`() {
+        val songs = listOf(SharedTrack("Teardrop", "Massive Attack", youtubeId = "u7K72X4eo_s"))
+        val web = ShareLinks.playlistUrl("Mine", null, songs)
+        val app = "luma://p#" + web.substringAfter('#')
+        assertThat(ShareLinks.parse(app)).isEqualTo(ShareLinks.parse(web))
+        val song = ShareLinks.trackUrl(songs.single())
+        assertThat(ShareLinks.parse("luma://s#" + song.substringAfter('#'))).isEqualTo(ShareLinks.Parsed.Track(songs.single()))
+        assertThat(ShareLinks.parse("luma://other#t=a&a=b")).isNull()
     }
 
     @Test fun `legacy luma track links still parse`() {
@@ -25,25 +76,38 @@ class ShareLinksTest {
         )
     }
 
-    @Test fun `foreign hosts, bad ids and missing fields are rejected`() {
-        assertThat(ShareLinks.parse("https://evil.example/m/Kx7Qa2pL")).isNull()
-        assertThat(ShareLinks.parse("$base/m/short")).isNull()
-        assertThat(ShareLinks.parse("$base/t?a=OnlyArtist")).isNull()
+    @Test fun `Stash's old links, other sites and broken links are not LUMA links`() {
+        assertThat(ShareLinks.parse("https://stashfm.app/m/Kx7Qa2pL")).isNull()
+        assertThat(ShareLinks.parse("https://stash-share.rawnaldclark.workers.dev/t?t=a&a=b")).isNull()
+        assertThat(ShareLinks.parse("https://evil.example/p#abc")).isNull()
+        assertThat(ShareLinks.parse("$base/p")).isNull()
+        assertThat(ShareLinks.parse("$base/p#not-really-a-playlist")).isNull()
+        assertThat(ShareLinks.parse("$base/s#a=OnlyArtist")).isNull()
+        assertThat(ShareLinks.parse("$base/s#t=%zz&a=A")).isNull()
+        assertThat(ShareLinks.parse("$base/other#t=a&a=b")).isNull()
         assertThat(ShareLinks.parse(null)).isNull()
         assertThat(ShareLinks.parse("not a url")).isNull()
-        assertThat(ShareLinks.parse("$base/t?t=%zz&a=A")).isNull()
     }
 
-    @Test fun `hostile or sloppy links are bounded, normalised or rejected`() {
+    @Test fun `hostile links are bounded and a decompression bomb is refused`() {
         val long = "x".repeat(5000)
-        val t = (ShareLinks.parse("$base/t?t=$long&a=A") as ShareLinks.Parsed.Track).track
+        val t = (ShareLinks.parse("$base/s#t=$long&a=A") as ShareLinks.Parsed.Track).track
         assertThat(t.title).hasLength(500)
-        assertThat(ShareLinks.parse("HTTPS://STASH-SHARE.RAWNALDCLARK.WORKERS.DEV/m/Kx7Qa2pL/")).isEqualTo(ShareLinks.Parsed.Mix("Kx7Qa2pL"))
-        assertThat(ShareLinks.parse("stash:track?t=a&a=b")).isNull()
-        assertThat(ShareLinks.parse("$base/t?t=+&a=A")).isNull()
-        val round = SharedTrack("C++ é", "Artist", durationMs = null)
-        assertThat(ShareLinks.parse(ShareLinks.trackUrl(round))).isEqualTo(ShareLinks.Parsed.Track(round))
-        assertThat((ShareLinks.parse("$base/t?t=T&a=A&d=-5") as ShareLinks.Parsed.Track).track.durationMs).isNull()
+        // 50 MB of spaces compresses to a few kB: it must be refused, not inflated.
+        val bomb = ByteArray(50_000_000) { ' '.code.toByte() }
+        val d = Deflater(Deflater.BEST_COMPRESSION, true).apply { setInput(bomb); finish() }
+        val buf = ByteArray(1_000_000)
+        val n = d.deflate(buf)
+        val link = "$base/p#" + Base64.getUrlEncoder().withoutPadding().encodeToString(buf.copyOf(n))
+        assertThat(ShareLinks.parse(link)).isNull()
+    }
+
+    @Test fun `a playlist from a newer LUMA asks for an update instead of half-opening`() {
+        val raw = """{"v":2,"n":"Future","t":[]}""".toByteArray()
+        val d = Deflater(Deflater.BEST_COMPRESSION, true).apply { setInput(raw); finish() }
+        val buf = ByteArray(1024)
+        val n = d.deflate(buf)
+        assertThat(ShareLinks.parse("$base/p#" + Base64.getUrlEncoder().withoutPadding().encodeToString(buf.copyOf(n)))).isNull()
     }
 
     @Test fun `cover allowlist matches hosts exactly or as a subdomain, https only`() {
@@ -52,72 +116,6 @@ class ShareLinksTest {
         assertThat(ShareConfig.isAllowedCover("https://evil.example/a.jpg")).isFalse()
         assertThat(ShareConfig.isAllowedCover("https://i.scdn.co.evil.example/a")).isFalse()
         assertThat(ShareConfig.isAllowedCover("http://i.scdn.co/a")).isFalse()
-        assertThat(ShareConfig.isAllowedCover("not a url")).isFalse()
         assertThat(ShareConfig.isAllowedCover(null)).isFalse()
-    }
-
-    @Test fun `links are built on stashfm-app and the old workers-dev links still open`() {
-        assertThat(ShareConfig.BASE_URL).isEqualTo("https://stashfm.app")
-        assertThat(ShareLinks.mixUrl("Kx7Qa2pL")).isEqualTo("https://stashfm.app/m/Kx7Qa2pL")
-        assertThat(ShareLinks.trackUrl(SharedTrack("T", "A"))).isEqualTo("https://stashfm.app/t?t=T&a=A")
-        val old = "https://stash-share.rawnaldclark.workers.dev"
-        assertThat(ShareLinks.parse("$old/m/Kx7Qa2pL")).isEqualTo(ShareLinks.Parsed.Mix("Kx7Qa2pL"))
-        assertThat(ShareLinks.parse("$old/l/K7QA2PXM")).isEqualTo(ShareLinks.Parsed.Room("K7QA2PXM"))
-        assertThat(ShareLinks.parse("$old/t?t=T&a=A")).isEqualTo(ShareLinks.Parsed.Track(SharedTrack("T", "A")))
-        assertThat(ShareLinks.parse("https://www.stashfm.app/m/Kx7Qa2pL")).isNull() // the apex only, like the manifest
-    }
-
-    @Test fun `api calls try stashfm-app first, then the old host, and links open from both`() {
-        assertThat(ShareConfig.API_BASE_URLS)
-            .containsExactly("https://stashfm.app", "https://stash-share.rawnaldclark.workers.dev").inOrder()
-        assertThat(ShareConfig.HOSTS).containsExactly("stashfm.app", "stash-share.rawnaldclark.workers.dev")
-    }
-
-    @Test fun `short song link builds and parses on either host`() {
-        assertThat(ShareLinks.trackShortUrl("Ab3xY9qk")).isEqualTo("https://stashfm.app/t/Ab3xY9qk")
-        assertThat(ShareLinks.parse(ShareLinks.trackShortUrl("Ab3xY9qk"))).isEqualTo(ShareLinks.Parsed.TrackRef("Ab3xY9qk"))
-        assertThat(ShareLinks.parse("https://stash-share.rawnaldclark.workers.dev/t/Ab3xY9qk"))
-            .isEqualTo(ShareLinks.Parsed.TrackRef("Ab3xY9qk"))
-        assertThat(ShareLinks.parse("HTTPS://STASHFM.APP/t/Ab3xY9qk/")).isEqualTo(ShareLinks.Parsed.TrackRef("Ab3xY9qk"))
-        // A share sheet may tack a query on; the id is still the path.
-        assertThat(ShareLinks.parse("$base/t/Ab3xY9qk?si=x")).isEqualTo(ShareLinks.Parsed.TrackRef("Ab3xY9qk"))
-    }
-
-    @Test fun `short song links with a bad id or a foreign host are rejected, never thrown`() {
-        assertThat(ShareLinks.parse("$base/t/Ab3xY9q")).isNull() // 7
-        assertThat(ShareLinks.parse("$base/t/Ab3xY9qkZ")).isNull() // 9
-        assertThat(ShareLinks.parse("$base/t/Ab3x-9qk")).isNull()
-        assertThat(ShareLinks.parse("$base/t/Ab3xY9qk/extra")).isNull()
-        assertThat(ShareLinks.parse("$base/t/%zz")).isNull()
-        assertThat(ShareLinks.parse("$base/t/")).isNull()
-        assertThat(ShareLinks.parse("http://stashfm.app/t/Ab3xY9qk")).isNull()
-        assertThat(ShareLinks.parse("https://evil.example/t/Ab3xY9qk")).isNull()
-        assertThat(ShareLinks.parse("stash://track/Ab3xY9qk")).isNull()
-    }
-
-    @Test fun `the long song link and the legacy scheme are unchanged on the new host`() {
-        val t = SharedTrack("Teardrop", "Massive Attack", "Mezzanine", 330_000, "GBAAA9800174", "sp1", "yt1")
-        assertThat(ShareLinks.parse(ShareLinks.trackUrl(t))).isEqualTo(ShareLinks.Parsed.Track(t))
-        assertThat(ShareLinks.parse("stash://track?t=Teardrop&a=Massive+Attack&y=yt1"))
-            .isEqualTo(ShareLinks.Parsed.Track(SharedTrack("Teardrop", "Massive Attack", youtubeId = "yt1")))
-    }
-
-    @Test fun `deezer's image cdn is a cover host`() {
-        assertThat(ShareConfig.isAllowedCover("https://cdn-images.dzcdn.net/images/cover/abc/1000x1000-000000-80-0-0.jpg")).isTrue()
-        assertThat(ShareConfig.isAllowedCover("https://e-cdns-images.dzcdn.net/images/cover/abc/1000x1000-000000-80-0-0.jpg")).isTrue()
-    }
-
-    @Test fun `room url and parse round-trip, lower case and a trailing slash accepted`() {
-        assertThat(ShareLinks.roomUrl("K7QA2PXM")).isEqualTo("$base/l/K7QA2PXM")
-        assertThat(ShareLinks.parse("$base/l/K7QA2PXM")).isEqualTo(ShareLinks.Parsed.Room("K7QA2PXM"))
-        assertThat(ShareLinks.parse("$base/l/k7qa2pxm/")).isEqualTo(ShareLinks.Parsed.Room("K7QA2PXM"))
-    }
-
-    @Test fun `room codes that are the wrong length, use ambiguous characters or come from another host are rejected`() {
-        assertThat(ShareLinks.parse("$base/l/K7QA2PX")).isNull()
-        assertThat(ShareLinks.parse("$base/l/K7QA2P")).isNull() // the old 6-character length
-        assertThat(ShareLinks.parse("$base/l/K7QA2PXO")).isNull() // no O in the alphabet
-        assertThat(ShareLinks.parse("$base/l/K7QA2PX1")).isNull() // no 1 either
-        assertThat(ShareLinks.parse("https://evil.example/l/K7QA2PXM")).isNull()
     }
 }

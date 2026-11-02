@@ -591,13 +591,7 @@ class ListenTogetherSessionTest {
         assertThat(player.calls.take(3)).containsExactly("save", "enter:host", "pause").inOrder()
         assertThat(connection.sent.filterIsInstance<ClientMessage.Load>()).containsExactly(ClientMessage.Load(track, 42_000, listOf(next)))
         assertThat(connection.hello!!()).isEqualTo(ClientMessage.Hello(name = "Rawn", resumeToken = "tok"))
-        assertThat((controller.state.value as ListenTogetherState.InRoom).url).isEqualTo(ShareLinks.roomUrl("K7QA2PXM"))
-    }
-
-    @Test fun `the host's invite is always a stashfm-app link, whichever host made the room`() = runTest {
-        // When stashfm.app can't be reached the room is made on the old workers.dev host, which answers with its own url.
-        host(serverUrl = "https://stash-share.rawnaldclark.workers.dev/l/K7QA2PXM")
-        assertThat((controller.state.value as ListenTogetherState.InRoom).url).isEqualTo("https://stashfm.app/l/K7QA2PXM")
+        assertThat((controller.state.value as ListenTogetherState.InRoom).url).isEqualTo("") // LUMA: no room server, so no invite link
     }
 
     @Test fun `a room that can't be created leaves everything alone`() = runTest {

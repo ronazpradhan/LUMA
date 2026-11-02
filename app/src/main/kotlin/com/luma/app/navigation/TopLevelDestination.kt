@@ -45,9 +45,9 @@ enum class TopLevelDestination(val selectedIcon: ImageVector, val unselectedIcon
 @Serializable data object SettingsAppearanceRoute
 @Serializable data object SettingsAboutRoute
 @Serializable data class MixBuilderRoute(val recipeId: Long? = null)
-@Serializable data class SharedMixRoute(val shareId: String)
+/** A shared playlist: [link] is the whole playlist, carried inside the link (no server). */
+@Serializable data class SharedMixRoute(val link: String)
 @Serializable data class SharedTrackRoute(val link: String)
-@Serializable data class ListenJoinRoute(val code: String)
 // Community's routes. LumaNavHost pops them while Community is off: a new one must join that check.
 /** Community's See all (spec 2026-09-26 §3); [mine] opens it on Mine (after a live_limit). */
 @Serializable data class CommunityRoute(val mine: Boolean = false)

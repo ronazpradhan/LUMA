@@ -3,99 +3,75 @@ package com.luma.feature.library.share
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.luma.core.data.db.entity.SharedMixEntity
 import com.luma.core.data.share.SharePreference
-import com.luma.core.data.share.ShareResult
 import com.luma.core.data.share.SharedMixRepository
 import com.luma.core.model.share.ShareLinks
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlin.coroutines.cancellation.CancellationException
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
-sealed interface ShareMixUiState {
-    data object Loading : ShareMixUiState
-    data class NotShared(val defaultName: String, val displayName: String?, val working: Boolean = false, val error: String? = null) : ShareMixUiState
-    data class Shared(val url: String, val name: String, val canManage: Boolean, val autoUpdate: Boolean, val error: String? = null) : ShareMixUiState
-}
+data class ShareMixUiState(
+    val defaultName: String = "",
+    val displayName: String? = null,
+    val working: Boolean = false,
+    val error: String? = null,
+)
+
+/** A link ready to send: [url] carries the whole playlist; [songs] it holds of [total]. */
+data class ShareMixLink(val url: String, val name: String, val songs: Int, val total: Int)
 
 /**
- * The share sheet (spec §5). A followed mix shares its *original* link: re-sharing a copy would
- * split it from the owner, so it isn't offered.
+ * LUMA: the share sheet. The link is built on the phone and carries the playlist itself, so there is
+ * nothing to create on a server, keep updated or take down. A later share sends the playlist as it is then.
  */
 @HiltViewModel
 class ShareMixViewModel @Inject constructor(
     private val repository: SharedMixRepository,
     private val sharePreference: SharePreference,
 ) : ViewModel() {
-    private val _state = MutableStateFlow<ShareMixUiState>(ShareMixUiState.Loading)
+    private val _state = MutableStateFlow(ShareMixUiState())
     val state: StateFlow<ShareMixUiState> = _state
     private var playlistId = 0L
-    private var observer: Job? = null
 
     fun bind(playlistId: Long, playlistName: String) {
-        if (this.playlistId == playlistId && observer != null) {
+        if (this.playlistId == playlistId) {
             // A reopened sheet starts clean, not with the last attempt's error.
-            (_state.value as? ShareMixUiState.NotShared)?.let { _state.value = it.copy(error = null) }
+            _state.value = _state.value.copy(error = null, working = false)
             return
         }
         this.playlistId = playlistId
-        observer?.cancel()
-        observer = viewModelScope.launch {
+        _state.value = ShareMixUiState(defaultName = playlistName)
+        viewModelScope.launch {
             val display = safely("read the display name") { sharePreference.displayName() }
-            try {
-                repository.observe(playlistId).collect { row ->
-                    _state.value = if (row == null || row.status != SharedMixEntity.STATUS_ACTIVE) {
-                        ShareMixUiState.NotShared(playlistName, display)
-                    } else {
-                        ShareMixUiState.Shared(ShareLinks.mixUrl(row.shareId), row.name, row.role == SharedMixEntity.ROLE_OWNER, row.autoUpdate)
-                    }
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "observe $playlistId failed", e)
-                _state.value = ShareMixUiState.NotShared(playlistName, display, error = "Couldn't load this mix's link.")
-            }
+            _state.value = _state.value.copy(displayName = display)
         }
     }
 
-    fun create(name: String, displayName: String?, autoUpdate: Boolean) {
-        val s = _state.value as? ShareMixUiState.NotShared ?: return
+    /** Builds the link for the playlist as it is now; [onReady] sends or copies it. */
+    fun makeLink(name: String, displayName: String?, onReady: (ShareMixLink) -> Unit) {
+        val s = _state.value
         if (s.working) return
         _state.value = s.copy(working = true, error = null)
         viewModelScope.launch {
-            val r = safely("create a link") {
+            val link = safely("build the link") {
                 sharePreference.setDisplayName(displayName)
-                repository.share(playlistId, name.ifBlank { s.defaultName }, displayName, autoUpdate)
+                val doc = repository.buildDocument(playlistId, name.ifBlank { s.defaultName }, displayName)
+                if (doc.tracks.isEmpty()) {
+                    null
+                } else {
+                    val url = ShareLinks.playlistUrl(doc.name, doc.sharedBy, doc.tracks, doc.covers)
+                    ShareMixLink(url, doc.name, minOf(doc.tracks.size, ShareLinks.MAX_LINK_TRACKS), doc.tracks.size)
+                }
             }
-            // On Ok the observer flips the state to Shared.
-            if (r !is ShareResult.Ok) {
-                val msg = (r as? ShareResult.Failed)?.message ?: "Couldn't create the link."
-                (_state.value as? ShareMixUiState.NotShared)?.let { _state.value = it.copy(working = false, error = msg) }
-            }
+            _state.value = _state.value.copy(
+                working = false,
+                error = if (link == null) "This playlist has no songs to share." else null,
+            )
+            link?.let(onReady)
         }
-    }
-
-    fun setAutoUpdate(on: Boolean) {
-        viewModelScope.launch {
-            if (safely("change auto-update") { repository.setAutoUpdate(playlistId, on) } == null) sharedError("Couldn't change that setting.")
-        }
-    }
-
-    /** [onDone] runs only once the link is really down. */
-    fun stopSharing(onDone: () -> Unit) {
-        viewModelScope.launch {
-            if (safely("stop sharing") { repository.stopSharing(playlistId) } == true) onDone()
-            else sharedError("Couldn't stop sharing. Check your connection.")
-        }
-    }
-
-    private fun sharedError(msg: String) {
-        (_state.value as? ShareMixUiState.Shared)?.let { _state.value = it.copy(error = msg) }
     }
 
     /** Runs [block]; a failure (DB, IO) is logged and becomes null, never a crash. */

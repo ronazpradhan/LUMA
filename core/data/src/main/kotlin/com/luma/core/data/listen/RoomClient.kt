@@ -136,7 +136,13 @@ internal class RoomClient(
         }
     }
 
-    private suspend fun connectOnce(): End = suspendCancellableCoroutine { cont ->
+    private suspend fun connectOnce(): End {
+        // LUMA: no room server (ShareConfig.API_BASE_URLS is empty), so a room ends before it starts.
+        if (bases.isEmpty()) return End.Final(CloseReason.ENDED)
+        return connectToHost()
+    }
+
+    private suspend fun connectToHost(): End = suspendCancellableCoroutine { cont ->
         val greeting = hello()
         val resume = greeting.resumeToken != null
         var openedAt: Long? = null

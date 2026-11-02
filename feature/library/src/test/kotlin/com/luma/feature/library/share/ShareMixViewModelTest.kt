@@ -1,18 +1,16 @@
 package com.luma.feature.library.share
 
 import com.google.common.truth.Truth.assertThat
-import com.luma.core.data.db.entity.SharedMixEntity
 import com.luma.core.data.share.SharePreference
-import com.luma.core.data.share.ShareResult
+import com.luma.core.data.share.SharedMixDocument
 import com.luma.core.data.share.SharedMixRepository
+import com.luma.core.model.share.ShareLinks
+import com.luma.core.model.share.SharedTrack
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
-import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
@@ -30,59 +28,43 @@ class ShareMixViewModelTest {
     @Before fun setUp() { Dispatchers.setMain(dispatcher) }
     @After fun tearDown() { Dispatchers.resetMain() }
 
-    @Test fun `not shared yet offers the form, create stores the name and shows the link`() = runTest(dispatcher) {
-        val row = MutableStateFlow<SharedMixEntity?>(null)
-        coEvery { repo.observe(5) } returns row
-        coEvery { pref.displayName() } returns "Rawn"
-        coEvery { repo.share(5, "Sleep", "Rawn", true) } coAnswers {
-            row.value = SharedMixEntity(5, "Kx7Qa2pL", SharedMixEntity.ROLE_OWNER, name = "Sleep", editKey = "k")
-            ShareResult.Ok("https://x/m/Kx7Qa2pL")
-        }
-        val vm = ShareMixViewModel(repo, pref); vm.bind(5, "Ambient"); advanceUntilIdle()
-        assertThat((vm.state.value as ShareMixUiState.NotShared).displayName).isEqualTo("Rawn")
-        vm.create("Sleep", "Rawn", autoUpdate = true); advanceUntilIdle()
-        coVerify { pref.setDisplayName("Rawn") }
-        val shared = vm.state.value as ShareMixUiState.Shared
-        assertThat(shared.url).endsWith("/m/Kx7Qa2pL")
-        assertThat(shared.name).isEqualTo("Sleep")
+    @Test fun `the link is built on the phone and carries the playlist`() = runTest(dispatcher) {
+        coEvery { pref.displayName() } returns "Ronaz"
+        val songs = listOf(SharedTrack("Teardrop", "Massive Attack", youtubeId = "u7K72X4eo_s"))
+        coEvery { repo.buildDocument(5, "Night drive", "Ronaz") } returns SharedMixDocument(name = "Night drive", sharedBy = "Ronaz", tracks = songs)
+        val vm = ShareMixViewModel(repo, pref)
+        vm.bind(5, "Night drive"); advanceUntilIdle()
+        assertThat(vm.state.value.displayName).isEqualTo("Ronaz")
+
+        var link: ShareMixLink? = null
+        vm.makeLink("", "Ronaz") { link = it }; advanceUntilIdle()
+
+        assertThat(link!!.url).startsWith("https://playluma.vercel.app/p#")
+        assertThat(link!!.songs).isEqualTo(1)
+        val parsed = ShareLinks.parse(link!!.url) as ShareLinks.Parsed.Playlist
+        assertThat(parsed.playlist.name).isEqualTo("Night drive")
+        assertThat(parsed.playlist.tracks).isEqualTo(songs)
+        coVerify { pref.setDisplayName("Ronaz") }
     }
 
-    @Test fun `rebinding the same playlist clears a stale error`() = runTest(dispatcher) {
-        coEvery { repo.observe(5) } returns flowOf(null)
-        coEvery { repo.share(any(), any(), any(), any()) } throws IOException("disk")
-        val vm = ShareMixViewModel(repo, pref); vm.bind(5, "Ambient"); advanceUntilIdle()
-        vm.create("Sleep", null, autoUpdate = true); advanceUntilIdle()
-        assertThat((vm.state.value as ShareMixUiState.NotShared).error).isNotNull()
-        vm.bind(5, "Ambient"); advanceUntilIdle()
-        assertThat((vm.state.value as ShareMixUiState.NotShared).error).isNull()
+    @Test fun `an empty playlist says so and makes no link`() = runTest(dispatcher) {
+        coEvery { repo.buildDocument(5, any(), any()) } returns SharedMixDocument(name = "Empty", tracks = emptyList())
+        val vm = ShareMixViewModel(repo, pref)
+        vm.bind(5, "Empty"); advanceUntilIdle()
+        var called = false
+        vm.makeLink("Empty", null) { called = true }; advanceUntilIdle()
+        assertThat(called).isFalse()
+        assertThat(vm.state.value.error).isNotNull()
     }
 
-    @Test fun `an owned share shows its link, a followed one shows the original link read-only`() = runTest(dispatcher) {
-        coEvery { repo.observe(5) } returns flowOf(SharedMixEntity(5, "Kx7Qa2pL", SharedMixEntity.ROLE_OWNER, name = "Sleep", editKey = "k"))
-        val owned = ShareMixViewModel(repo, pref); owned.bind(5, "Ambient"); advanceUntilIdle()
-        val s = owned.state.value as ShareMixUiState.Shared
-        assertThat(s.url).endsWith("/m/Kx7Qa2pL"); assertThat(s.canManage).isTrue()
-        coEvery { repo.observe(6) } returns flowOf(SharedMixEntity(6, "BBBBBBBB", SharedMixEntity.ROLE_FOLLOWER, name = "F"))
-        val followed = ShareMixViewModel(repo, pref); followed.bind(6, "F"); advanceUntilIdle()
-        assertThat((followed.state.value as ShareMixUiState.Shared).canManage).isFalse()
-    }
-
-    @Test fun `a create that throws shows an error instead of crashing`() = runTest(dispatcher) {
-        coEvery { repo.observe(5) } returns flowOf(null)
-        coEvery { repo.share(any(), any(), any(), any()) } throws IOException("disk")
-        val vm = ShareMixViewModel(repo, pref); vm.bind(5, "Ambient"); advanceUntilIdle()
-        vm.create("Sleep", null, autoUpdate = true); advanceUntilIdle()
-        val s = vm.state.value as ShareMixUiState.NotShared
-        assertThat(s.working).isFalse(); assertThat(s.error).isNotNull()
-    }
-
-    @Test fun `a failed stop sharing keeps the link and shows an error`() = runTest(dispatcher) {
-        coEvery { repo.observe(5) } returns flowOf(SharedMixEntity(5, "Kx7Qa2pL", SharedMixEntity.ROLE_OWNER, name = "Sleep", editKey = "k"))
-        coEvery { repo.stopSharing(5) } returns false
-        val vm = ShareMixViewModel(repo, pref); vm.bind(5, "Ambient"); advanceUntilIdle()
-        var done = false
-        vm.stopSharing { done = true }; advanceUntilIdle()
-        assertThat(done).isFalse()
-        assertThat((vm.state.value as ShareMixUiState.Shared).error).isNotNull()
+    @Test fun `a playlist longer than a link holds says how many songs went in`() = runTest(dispatcher) {
+        val songs = (1..700).map { SharedTrack("Song $it", "Artist") }
+        coEvery { repo.buildDocument(5, any(), any()) } returns SharedMixDocument(name = "Huge", tracks = songs)
+        val vm = ShareMixViewModel(repo, pref)
+        vm.bind(5, "Huge"); advanceUntilIdle()
+        var link: ShareMixLink? = null
+        vm.makeLink("Huge", null) { link = it }; advanceUntilIdle()
+        assertThat(link!!.songs).isEqualTo(ShareLinks.MAX_LINK_TRACKS)
+        assertThat(link!!.total).isEqualTo(700)
     }
 }
