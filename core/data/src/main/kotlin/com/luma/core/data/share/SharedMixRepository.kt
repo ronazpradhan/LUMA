@@ -75,15 +75,13 @@ class SharedMixRepository @Inject constructor(
     }
 
     /**
-     * The playlist's picture for a link: its own cover when that's a web image, else up to four
-     * songs' covers for a mosaic. A photo picked from the gallery is a local file, which a link
-     * can't carry without a server, so it falls back to the mosaic too.
+     * The playlist's picture for a link: its own cover when that's a web image, else nothing, and
+     * whoever opens the link builds the mosaic from the songs' YouTube ids. Cover addresses are long
+     * and don't compress, so carrying four of them more than doubled a short playlist's link. A photo
+     * picked from the gallery is a local file, which a link can't carry without a server.
      */
-    private suspend fun linkCovers(playlistId: Long, tracks: List<Track>): List<String> {
-        fun String?.web() = this?.takeIf { it.length <= 500 && ShareConfig.isAllowedCover(it) }
-        playlistDao.getById(playlistId)?.artUrl.web()?.let { return listOf(it) }
-        return tracks.mapNotNull { it.albumArtUrl.web() }.distinct().take(4)
-    }
+    private suspend fun linkCovers(playlistId: Long, @Suppress("UNUSED_PARAMETER") tracks: List<Track>): List<String> =
+        listOfNotNull(playlistDao.getById(playlistId)?.artUrl?.takeIf { it.length <= 500 && ShareConfig.isAllowedCover(it) })
 
     /** Persist every descriptor (deduped against the library), keeping document order and dropping repeats. */
     suspend fun persistTracks(doc: SharedMixDocument): List<Long> =

@@ -53,11 +53,13 @@ class SharedMixRepositoryOwnerTest {
         assertThat(repo.buildDocument(playlistId, "Ambient", sharedBy = "n".repeat(39) + "🎧").sharedBy).isEqualTo("n".repeat(39))
     }
 
-    @Test fun `a link carries the playlist's own web cover, and a gallery photo falls back to song covers`() = runBlocking {
+    @Test fun `a link carries only the playlist's own web cover, never song covers or a gallery photo`() = runBlocking {
         db.playlistDao().updateArtUrl(playlistId, "https://i.scdn.co/image/own")
         assertThat(repo.buildDocument(playlistId, "Ambient", null).covers).containsExactly("https://i.scdn.co/image/own")
         db.playlistDao().updateArtUrl(playlistId, "file:///data/user/0/com.luma.music/files/covers/7.jpg")
-        assertThat(repo.buildDocument(playlistId, "Ambient", null).covers).containsExactly("https://i.scdn.co/image/1")
+        assertThat(repo.buildDocument(playlistId, "Ambient", null).covers).isEmpty()
+        db.playlistDao().updateArtUrl(playlistId, null)
+        assertThat(repo.buildDocument(playlistId, "Ambient", null).covers).isEmpty()
         Unit
     }
 }

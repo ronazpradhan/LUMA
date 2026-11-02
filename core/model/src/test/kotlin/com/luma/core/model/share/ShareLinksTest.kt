@@ -52,6 +52,18 @@ class ShareLinksTest {
         ).inOrder()
     }
 
+    @Test fun `a six-song playlist like a real one makes a short link`() {
+        val songs = listOf(
+            SharedTrack("ADRIAN PRADHAN - NASAMJHA (UNPLUGGED)", "Adrian Pradhan", durationMs = 245_000, youtubeId = "abcdefghij1"),
+            SharedTrack("Jham Jham", "Kta Haru", durationMs = 210_000, youtubeId = "abcdefghij2"),
+            SharedTrack("Sajilai Birsideu", "Prateek Khadka", durationMs = 233_000, youtubeId = "abcdefghij3"),
+            SharedTrack("Nasamjha", "Adrian Pradhan", durationMs = 251_000, youtubeId = "abcdefghij4"),
+            SharedTrack("Khaseka Tara", "Albatross", durationMs = 300_000, youtubeId = "abcdefghij5"),
+            SharedTrack("Bagaicha", "Kta Haru", durationMs = 222_000, youtubeId = "abcdefghij6"),
+        )
+        assertThat(ShareLinks.playlistUrl("nepali songs", null, songs).length).isLessThan(400)
+    }
+
     @Test fun `a song link carries every field after the hash and parses back`() {
         val t = SharedTrack("Song & Dance", "Aphex Twin", "Drukqs", 125_000, "GBBPW0100025", "abc", "xyz")
         val url = ShareLinks.trackUrl(t)

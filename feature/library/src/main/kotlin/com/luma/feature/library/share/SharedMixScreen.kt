@@ -60,7 +60,7 @@ fun SharedMixScreen(
             is SharedMixUiState.Loaded -> LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
                 item {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        SharedCover(s.doc.covers, s.doc.tracks.firstNotNullOfOrNull { it.youtubeId })
+                        SharedCover(s.doc.covers, s.doc.tracks.mapNotNull { it.youtubeId }.distinct())
                         Spacer(Modifier.size(16.dp))
                         Column {
                             Text(s.doc.name, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -91,13 +91,15 @@ fun SharedMixScreen(
 }
 
 /**
- * The shared playlist's picture: its own cover, or four song covers as a 2x2 mosaic (as the link
- * carries them), else the first song's YouTube thumbnail. Off-list hosts never load.
+ * The shared playlist's picture: its own cover, else a 2x2 mosaic of the first four songs' YouTube
+ * thumbnails (built here, so the link needn't carry it), else the first one. Links from 1.4.0 may
+ * carry four covers for the mosaic themselves. Off-list hosts never load.
  */
 @Composable
-private fun SharedCover(covers: List<String>, firstVideo: String?) {
+private fun SharedCover(covers: List<String>, videos: List<String>) {
     val shape = RoundedCornerShape(12.dp)
-    val safe = covers.filter(ShareConfig::isAllowedCover)
+    val own = covers.filter(ShareConfig::isAllowedCover)
+    val safe = own.ifEmpty { videos.filter { YT_ID.matches(it) }.take(4).map { "https://i.ytimg.com/vi/$it/hqdefault.jpg" } }
     val box = Modifier.size(96.dp).clip(shape)
     when {
         safe.size >= 4 -> Column(box) {
@@ -108,7 +110,8 @@ private fun SharedCover(covers: List<String>, firstVideo: String?) {
             }
         }
         safe.isNotEmpty() -> AsyncImage(safe.first(), null, box, contentScale = ContentScale.Crop)
-        firstVideo != null -> AsyncImage("https://i.ytimg.com/vi/$firstVideo/hqdefault.jpg", null, box, contentScale = ContentScale.Crop)
         else -> Box(box.background(MaterialTheme.colorScheme.surfaceVariant))
     }
 }
+
+private val YT_ID = Regex("^[A-Za-z0-9_-]{11}$")
